@@ -83,6 +83,15 @@ Avoid:
 
 The bridge is 3gent's trusted local control plane.
 
+### Initial implementation
+
+Stage 1 implements the bridge in TypeScript on Node.js. The fake-agent adapter,
+HTTP transport, protocol validation, event store, and command registry are
+separate modules so the Codex adapter can replace only the fake-agent boundary
+in Stage 2. The current 3DS client sends versioned commands over one warm HTTP
+connection, streams microphone PCM over a second, and polls bounded NDJSON event
+batches using a per-session sequence cursor.
+
 ### Responsibilities
 
 - agent process/session integration;
@@ -327,9 +336,9 @@ This is a conceptual model, not a frozen serialization schema.
 mic → bounded capture/stream → desktop media handling → transcribe → prompt → agent
 ```
 
-Whether production voice transport streams during capture or uploads after
-release remains a measured transport decision. The Stage 0 live-streaming spike
-uses fixed client buffers and laptop-side WAV assembly.
+Whether remote production voice transport streams during capture or uploads
+after release remains a measured transport decision. The proven local path uses
+fixed client buffers, a live chunked request, and laptop-side WAV assembly.
 
 ### Text
 
@@ -372,4 +381,5 @@ tools/
   fixtures/
 ```
 
-Do not create every directory just because it appears here. Stage 0 should create only what it needs.
+Create a boundary only when its stage needs it; `relay/` and production adapter
+directories remain deferred.

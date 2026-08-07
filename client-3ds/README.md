@@ -1,178 +1,129 @@
-# 3gent Stage 0 3DS client
+# 3gent Stage 1 3DS client
 
-This client tests the five Stage 0 3DS boundaries:
+This client connects the handheld feasibility work to the TypeScript desktop
+bridge and its deterministic fake agent. It is still a local-development build,
+not a remotely secure product.
 
-1. launch a basic top/bottom-screen homebrew app;
-2. retrieve text from the native software keyboard;
-3. send that text to a LAN development server and display its response;
-4. append, wrap, and scroll a deliberately streamed response;
-5. hold a physical button to stream bounded-memory microphone audio while the
-   laptop assembles an inspectable WAV file.
+The client currently provides:
 
-This is a development spike, not the production bridge or protocol. The basic
-keyboard, LAN echo path, incremental rendering, and held scroll navigation have
-passed on physical hardware. The cache-coherency fix in `0.0.7-stage0` also
-resolved the repeatable 40 ms microphone stall on hardware. The next focused
-test is `0.0.8-stage0`'s warm command/audio connections and low-latency socket
-settings, added after hardware showed one-to-two-second fresh-connection delays.
+- native software-keyboard text capture;
+- bounded-memory live microphone streaming using signed PCM16 mono at 16,364 Hz;
+- two pre-warmed HTTP/1.1 connections for low-latency commands and audio;
+- protocol-v1 commands with unique command IDs;
+- bounded NDJSON event polling with a per-session sequence cursor;
+- incremental fake-agent text, status, approval, and interruption UI;
+- fixed 2 KiB response storage and held-button scroll navigation.
 
-The microphone spike uses the current libctru MIC service with signed 16-bit
-mono PCM at the `MICU_SAMPLE_RATE_16360` setting (approximately 16,364.479 Hz).
-The generated WAV declares the rounded integer rate of 16,364 Hz. The client
-opens one HTTP/1.1 chunked stream while `R` is held, sends each roughly 40 ms MIC
-update without waiting for a larger batch, and retains only an 8 KiB outgoing
-buffer. A five-minute safety ceiling bounds each development capture without
-making memory usage grow with duration. Stage 0 keeps separate HTTP/1.1
-connections warm for commands and audio, allowing either path to begin without
-opening a new TCP connection.
+Stage 0 keyboard, LAN, streamed rendering, scrolling, sustained microphone
+capture, and warm-connection latency have passed on physical hardware. The
+Stage 1 vertical slice builds on the host and is awaiting the checklist below.
 
 ## Prerequisites
 
 Install the current official devkitPro toolchain. On macOS, follow the
-[devkitPro getting-started instructions](https://devkitpro.org/wiki/Getting_Started):
+[devkitPro getting-started instructions](https://devkitpro.org/wiki/Getting_Started),
+install the `3ds-dev` package group, and restart the shell so `DEVKITPRO` and
+`DEVKITARM` are available.
 
-1. Install Apple's command-line tools with `xcode-select --install` if needed.
-2. Install the official devkitPro pacman package for macOS.
-3. Restart the Mac or reload the devkitPro environment setup.
-4. Install the supported 3DS package group:
+The desktop bridge requires Node.js 22 or newer and npm.
 
-   ```sh
-   sudo dkp-pacman -Syu
-   sudo dkp-pacman -S 3ds-dev
-   ```
+## Build the bridge and client
 
-The build expects `DEVKITPRO`, `DEVKITARM`, `arm-none-eabi-gcc`, and libctru to
-come from that installation. Do not downgrade the toolchain for this project.
-
-## Configure and build
-
-First find the LAN IPv4 address of the computer running the development server.
-The 3DS must be able to reach this address. Then build with that numeric address:
+First find the LAN IPv4 address of the computer that will run the bridge. Build
+the 3DS client with that numeric address:
 
 ```sh
 cd client-3ds
 make SERVER_HOST=192.168.1.42 SERVER_PORT=8080
 ```
 
-Replace `192.168.1.42` with the development computer's address. Stage 0 accepts
-a numeric IPv4 address only; runtime configuration and discovery are intentionally
-deferred.
+Replace `192.168.1.42` with the computer's address. Runtime configuration and
+pairing come in later stages. The build produces `3gent.3dsx`, `3gent.smdh`,
+`3gent.elf`, and `build/3gent.map`.
 
-Produced files:
-
-- `3gent.3dsx` — Homebrew Launcher application;
-- `3gent.smdh` — application metadata;
-- `3gent.elf` and `build/3gent.map` — development outputs.
-
-Run `make clean` to remove generated files.
-
-## Start the development server
-
-From the repository root:
+From the repository root, install, test, and start the Stage 1 bridge:
 
 ```sh
-python3 tools/dev-server/server.py --host 0.0.0.0 --port 8080
+cd bridge
+npm ci
+npm test
+npm start -- --host 0.0.0.0 --port 8080
 ```
 
-This unauthenticated server is for a trusted development LAN and disposable test
-messages only. See [the server README](../tools/dev-server/README.md) for checks
-and troubleshooting.
+Binding to `0.0.0.0` exposes an unauthenticated development service to the local
+network. Use a trusted LAN and disposable prompts. Do not expose it to the
+internet.
 
 ## Install and launch
 
-Copy `3gent.3dsx` and `3gent.smdh` to a `3ds/3gent/` directory on the SD card,
-then launch 3gent through the Homebrew Launcher. Exact copying steps depend on
-the user's existing homebrew setup.
+Copy `3gent.3dsx` and `3gent.smdh` into `3ds/3gent/` on the SD card, then launch
+3gent through the Homebrew Launcher.
 
-Captured audio is uploaded to the development server and saved as
-`tools/dev-server/captures/latest.wav`. Each successful recording replaces the
-previous `latest.wav`. On macOS, open it from the repository root with:
+The Stage 1 controls are:
 
-```sh
-open tools/dev-server/captures/latest.wav
-```
+- `A`: open the native keyboard and send text to the fake agent;
+- `X`: start a fake approval demo, or approve once when one is pending;
+- `B`: interrupt an active turn, or decline a pending approval;
+- hold `R`: stream microphone audio, then send it on release;
+- D-pad/Circle Pad Up/Down: scroll the response, including held repeat;
+- `START`: exit.
 
-## Physical hardware verification checklist
+Successful audio is saved as `bridge/data/latest.wav`. The fake adapter does not
+transcribe it yet; it generates a mock voice-capture response so the full event
+path can be tested.
 
-Record the hardware model, host OS, devkitPro package versions, and network setup
-with the result.
+## Physical Stage 1 verification checklist
 
-1. Stop any older development-server process, start the server from the current
-   source, and confirm that `/health` responds. Version `0.0.8-stage0` requires
-   the server's HTTP/1.1 persistent-connection support.
-2. Launch 3gent from the Homebrew Launcher.
-3. Confirm that both screens clear and render without corruption.
-4. Confirm that the top screen shows `3gent`, `Stage 0A-E`, and version
-   `0.0.8-stage0`.
-5. Wait for startup warmup to finish. Confirm that the bottom screen reports
-   `warm links: 2/2` and record the displayed warmup time.
-6. Press `A`; confirm that the native software keyboard opens.
-7. Choose Cancel; confirm that the app returns safely and reports cancellation.
-8. Press `A` again, type `hello`, and choose Send.
-9. Confirm that the server logs the request nearly immediately after Send and
-   record the on-screen `Request completed in ... ms` measurement. The focused
-   trusted-LAN target is below 250 ms; record the actual value if it is higher.
-10. Confirm that the top screen shows `Echo complete`, the entered text, and
-    `hello from 3gent dev server: hello`.
-12. Press `X`; confirm that text appears in multiple visible updates over roughly
-    two seconds and finishes with `Stream complete`.
-13. Press and hold D-pad or Circle Pad Up and Down; confirm that scrolling moves
-    once immediately, repeats after a short delay, stops on release, and that the
-    bottom screen reports the scroll position.
-14. Press and hold `R`. Confirm that `Streaming audio...` appears without the
-    previous one-to-two-second pause and record both values in
-    `Audio ready in ... ms (link ... ms)`.
-    Continue speaking for at least fifteen seconds and confirm that `Held`
-    tracks the actual hold time, `PCM` keeps increasing at roughly the same
-    rate, `pos` and `changes` keep advancing, `MICU` remains `sampling`, and
-    `no new data` repeatedly returns near zero instead of growing continuously.
-15. While still holding `R`, confirm that
-    `tools/dev-server/captures/latest.wav.tmp` exists and grows on the laptop.
-    This distinguishes live streaming from a release-time upload.
-16. Release `R`; confirm that streaming stops, the app reports the transmitted
-    PCM byte count and duration, and the server logs an `/audio/stream` request.
-17. Confirm that `tools/dev-server/captures/latest.wav` exists on the computer,
-    opens in an audio player, has the expected duration, and contains intelligible
-    microphone audio.
-18. Stop the server and send text again; confirm that an error or timeout appears
-    within roughly five seconds.
-19. With the server stopped, hold `R`; confirm local microphone capture begins
-    immediately, then stops with a visible stream error within roughly five
-    seconds without producing a completed server capture.
-20. Restart the server, begin another recording, then stop the server while `R`
-    remains held. Confirm the app exits recording with a visible stream error and
-    does not replace the last completed `latest.wav` with a partial capture.
-21. Restart the server and confirm that `A`, `X`, or a new `R` press retries
-    successfully without restarting the 3DS app.
-22. Start recording, close and reopen the shell, then release `R`; record whether
-    the app resumes, stops, errors, or captures unexpected audio.
-23. Press `START`; confirm that the app exits cleanly to the Homebrew Launcher.
+Record the hardware model, host OS, tool versions, and displayed timings.
 
-Do not mark `R-001`, `R-002`, or the 3DS portion of `R-003` proven until these
-steps have been performed on hardware.
+1. Start the TypeScript bridge and confirm it prints its listening address.
+2. Launch `0.1.0-stage1` through the Homebrew Launcher.
+3. Confirm startup reports `warm links: 2/2`, then shows agent state `idle`.
+4. Press `A`, cancel the keyboard, and confirm the app returns safely.
+5. Press `A`, send `hello from 3DS`, and confirm the bridge accepts it almost
+   immediately.
+6. Confirm the top screen moves through working/receiving/idle states and shows
+   the fake response incrementally rather than all at once.
+7. Hold Up/Down and confirm scroll repeat still works while the response remains
+   readable.
+8. Send a longer prompt, press `B` while text is arriving, and confirm the turn
+   stops with an interruption message and returns to idle.
+9. While idle, press `X`. Confirm an approval appears with the summary
+   `Run the fake Stage 1 test command`.
+10. Press `X` again to approve once. Confirm the fake turn resumes and completes.
+11. Start the approval demo again, then press `B`. Confirm decline is shown and
+    the fake command is not run.
+12. While idle, hold `R` and speak for at least fifteen seconds. Confirm the
+    PCM duration continues increasing and audio starts without the old delay.
+13. Release `R`; confirm the fake voice response streams on screen and
+    `bridge/data/latest.wav` has the expected duration and intelligible audio.
+14. Leave the app idle for at least eleven minutes, then send another prompt and
+    start a short audio capture. Record whether both connections recover without
+    restarting the app.
+15. Stop the bridge and confirm a visible event error. Restart it and confirm the
+    app reports a session resync, then sends a new prompt without being restarted.
+16. Close and reopen the shell during an active turn and record the resulting
+    stop, error, or resume behavior.
+17. Press `START` and confirm a clean return to the Homebrew Launcher.
+
+Do not mark the Stage 1 handheld slice complete until steps 1–13 pass. The
+long-idle, restart, and shell behavior are explicit reliability follow-ups even
+if the main vertical slice succeeds.
 
 ## Troubleshooting
 
-- `DEVKITARM is not set`: install the official `3ds-dev` package group and restart
-  the shell or Mac so the devkitPro environment is loaded.
-- `connect timed out`: verify the compiled IP, server bind address, computer
-  firewall, and that both devices can communicate on the same LAN.
-- `connect failed (... Connection refused)`: start the server on the compiled
-  port and verify no firewall is rejecting it.
-- `server returned HTTP 404`: restart the supplied Stage 0 server so both
-  the text and microphone endpoints are available.
-- `server closed warm connection; restart updated server`: stop the existing
-  Python process and launch the server from the same current checkout as the
-  `0.0.8-stage0` client.
-- `response exceeded the bounded buffer`: the client intentionally refuses an
-  HTTP response larger than its fixed development buffer.
-- `Mic: unavailable`: record the hexadecimal on-screen MIC service error,
-  exit any other software using the microphone, and restart the app.
-- `Audio stream error`: restore the development server and press `R` again. A
-  failed live stream is discarded; only a fully finalized capture replaces
-  `latest.wav`.
-- `MIC service stopped while R was held`: record the full on-screen message and
-  whether another title was using the microphone, then restart the app.
-- `Held` increases while `PCM`, `pos`, and `changes` remain frozen: photograph
-  the bottom screen before releasing `R`. Those counters distinguish a MIC
-  service stop from stale shared-memory visibility.
+- `DEVKITARM is not set`: install the official `3ds-dev` package group and
+  restart the shell or Mac.
+- `connect timed out`: verify the compiled IP, bridge bind address, firewall,
+  and that both devices can communicate on the same LAN.
+- `server returned HTTP 404` or `426`: stop the Python Stage 0 server and launch
+  the current TypeScript bridge from this checkout.
+- `server closed warm connection`: restart the current bridge and retry.
+- `response exceeded the bounded buffer`: report the action and server log; the
+  client intentionally rejects oversized event batches.
+- `Agent: offline`: keep the bridge running, retry an action, and record whether
+  it reconnects.
+- `Mic: unavailable`: exit other software using the microphone, record the
+  hexadecimal service error, and restart the app.
+- `Audio stream error`: restore the bridge and record again. Partial captures
+  are discarded and do not replace the last completed WAV.

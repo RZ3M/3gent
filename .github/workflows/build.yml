@@ -6,6 +6,22 @@ on:
   workflow_dispatch:
 
 jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: bridge/package-lock.json
+      - name: Install bridge dependencies
+        run: npm ci
+        working-directory: bridge
+      - name: Build and test the Stage 1 bridge
+        run: npm test
+        working-directory: bridge
+
   dev-server:
     runs-on: ubuntu-latest
     steps:
@@ -25,7 +41,7 @@ jobs:
         run: make -C client-3ds SERVER_HOST=192.0.2.1 SERVER_PORT=8080
       - uses: actions/upload-artifact@v7
         with:
-          name: 3gent-stage0
+          name: 3gent-stage1
           path: |
             client-3ds/3gent.3dsx
             client-3ds/3gent.smdh

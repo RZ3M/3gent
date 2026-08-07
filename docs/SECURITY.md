@@ -120,7 +120,9 @@ Consider end-to-end/application-layer protection only if it can be implemented w
 
 ## 9. Local development
 
-It is acceptable for the Stage 0 LAN echo spike to use plain local HTTP **only as a clearly marked development experiment**.
+It is acceptable for the Stage 0 fixtures and Stage 1 local fake-agent slice to
+use plain local HTTP **only as clearly marked development experiments on a
+trusted LAN with disposable input**.
 
 It must not be presented as the remote production security model.
 

@@ -12,3 +12,8 @@ __pycache__/
 *.py[cod]
 .venv/
 tools/dev-server/captures/
+
+# TypeScript desktop bridge
+bridge/node_modules/
+bridge/dist/
+bridge/data/

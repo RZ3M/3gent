@@ -8,23 +8,26 @@ The 3DS is a **thin client**: it captures voice, text, photos, and stylus sketch
 
 > A pocket remote for your coding agents, built around the hardware the 3DS is actually good at: microphone, camera, stylus, buttons, and two small screens.
 
-## What we are building first
+## What we are building now
 
-The first milestone is deliberately tiny:
+Stage 0 proved the risky handheld boundaries on physical hardware: the homebrew
+app launches, the native keyboard returns text, local networking works,
+incremental output renders and scrolls, and microphone PCM streams using bounded
+client memory. Two warm HTTP connections removed the measured one-to-two-second
+fresh-connection delay; the user confirmed the revised text and audio paths feel
+responsive.
 
-1. Build and launch a 3DS homebrew app.
-2. Open the native 3DS software keyboard.
-3. Enter a text prompt.
-4. Send it over local Wi-Fi to a tiny development server.
-5. Receive a response.
-6. Display that response incrementally on the 3DS.
+Stage 1 now turns those isolated proofs into a local fake-agent vertical slice:
 
-The keyboard, networking, incremental-output loop, and sustained microphone
-capture now work on hardware. Hardware feedback then exposed roughly one to two
-seconds of avoidable setup latency because every action opened a new TCP
-connection. A warm-connection revision is ready for its focused retest.
+```text
+3DS text/voice → TypeScript bridge → fake agent → protocol-v1 events → 3DS
+```
 
-## Stage 0 implementation status
+It exercises session state, streamed text deltas, interruption, approval
+requests and responses, command deduplication, and cursor-based event replay
+before a real coding-agent adapter is introduced.
+
+## Implementation status
 
 The Stage 0A-E implementation now lives in `client-3ds/` and
 `tools/dev-server/`. It includes:
@@ -45,11 +48,18 @@ build passes in CI using devkitPro's official toolchain container. Held-button
 scroll repeat also passed its focused hardware retest. Version `0.0.7-stage0`
 fixed the observed 40 ms microphone stall on hardware. Version `0.0.8-stage0`
 warms and reuses separate low-latency command and audio connections so user
-actions no longer pay a fresh TCP handshake.
+actions no longer pay a fresh TCP handshake; its focused hardware retest passed.
+
+The new `bridge/` service is a TypeScript/Node implementation of the Stage 1
+agent boundary with a deterministic fake adapter. Its automated tests cover the
+protocol version, sessions, ordered/replayed events, duplicate commands,
+approvals, interruption, and streamed audio/WAV output. The `0.1.0-stage1` 3DS
+client builds successfully and is ready for its physical vertical-slice test.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
-physical test checklist. See [`tools/dev-server/README.md`](tools/dev-server/README.md)
-for the local server.
+physical Stage 1 checklist. See [`bridge/README.md`](bridge/README.md) for the
+current local bridge. The Python server under `tools/dev-server/` remains as the
+reproducible Stage 0 fixture.
 
 ## Core product decisions
 
@@ -74,9 +84,8 @@ for the local server.
 ├── AGENTS.md
 ├── README.md
 ├── client-3ds/          # 3DS homebrew client
-├── bridge/              # desktop bridge (created after feasibility)
-├── relay/               # optional remote relay (later)
-├── protocol/            # shared protocol schemas/specs
+├── bridge/              # TypeScript desktop bridge and fake adapter
+├── protocol/            # machine-readable protocol schemas
 ├── tools/               # local development utilities
 ├── docs/
 │   ├── PRODUCT.md
@@ -106,9 +115,11 @@ Codex supports repository-level `AGENTS.md` instructions, so this repo uses `AGE
 
 ## Current phase
 
-**Phase 0: feasibility.**
+**Stage 1: local fake-agent vertical slice.**
 
-Do not try to build the complete remote-agent product yet. Prove the risky 3DS platform boundaries one at a time.
+The host implementation is complete and the 3DS build is ready for physical
+testing. The next stage is the first real desktop adapter; remote relay and
+production authentication remain deliberately deferred.
 
 ## License status
 

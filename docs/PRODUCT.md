@@ -199,4 +199,4 @@ Important unresolved items:
 - whether Old 3DS remains fully supported after benchmarking;
 - transcript review/edit behavior;
 - exact approval categories;
-- desktop bridge implementation language.
+- production remote transport and reconnect behavior.

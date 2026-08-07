@@ -29,6 +29,16 @@ bool network_post_text(
     void *progress_user_data
 );
 
+bool network_get_text(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *response,
+    size_t response_capacity,
+    char *error,
+    size_t error_capacity
+);
+
 bool network_post_bytes(
     const char *host,
     unsigned short port,

@@ -4,6 +4,8 @@ This roadmap is ordered by **risk reduction**, not excitement.
 
 ## Stage 0 — Prove the 3DS boundaries
 
+**Status:** Core feasibility complete on hardware; failure-path hardening remains.
+
 ### 0A. Hello 3gent
 
 Deliver:
@@ -52,6 +54,8 @@ We know whether the core client is technically viable on real hardware.
 
 ## Stage 1 — Local fake-agent vertical slice
 
+**Status:** Host implementation complete; physical 3DS vertical-slice test pending.
+
 Build a minimal local bridge abstraction.
 
 Flow:
@@ -61,6 +65,8 @@ Flow:
 ```
 
 Deliver:
+- TypeScript/Node desktop bridge;
+- versioned agent-agnostic protocol;
 - session ID;
 - working/idle status;
 - text delta events;
@@ -68,6 +74,17 @@ Deliver:
 - fake approval request.
 
 Do not integrate real coding agents until the 3gent protocol shape feels sane.
+
+Implemented on the host:
+
+- protocol-v1 headers, command IDs, acknowledgements, errors, and event envelope;
+- bounded per-session replay and command deduplication;
+- deterministic fake text, approval, interruption, and audio behavior;
+- strict TypeScript build and automated bridge tests;
+- Stage 1 3DS build with bounded event parsing and the full control mapping.
+
+Exit criterion: the physical checklist in `client-3ds/README.md` passes through
+text, interruption, both approval choices, and sustained audio.
 
 ---
 
@@ -89,7 +106,21 @@ Codex-specific wire objects must stop at the adapter boundary.
 
 ---
 
-## Stage 3 — QR pairing
+## Stage 3 — Voice-first local loop
+
+Deliver:
+- reliable push-to-talk through the bridge;
+- transcription;
+- transcript/error UX;
+- latency measurements;
+- retry;
+- configurable transcription provider/local backend.
+
+Complete the useful local voice→agent loop before adding remote transport risk.
+
+---
+
+## Stage 4 — QR pairing
 
 Deliver:
 - bridge-generated QR;
@@ -103,7 +134,7 @@ Security review required.
 
 ---
 
-## Stage 4 — Remote relay
+## Stage 5 — Remote relay
 
 Deliver:
 - authenticated bridge↔relay;
@@ -115,18 +146,6 @@ Deliver:
 - remote session loop.
 
 Do not ship a public relay until threat model and abuse controls are written.
-
----
-
-## Stage 5 — Voice-first polish
-
-Deliver:
-- reliable push-to-talk;
-- transcription;
-- transcript/error UX;
-- latency measurements;
-- retry;
-- configurable transcription provider/local backend.
 
 ---
 

@@ -29,6 +29,20 @@ static bool soc_ready = false;
 static int control_socket = -1;
 static int prepared_audio_socket = -1;
 static int audio_stream_socket = -1;
+static u32 next_command_id = 1;
+
+static void make_command_id(char *command_id, size_t capacity)
+{
+    u64 now_ms = osGetTime();
+    snprintf(
+        command_id,
+        capacity,
+        "cmd_3ds_%08lx%08lx_%08lx",
+        (unsigned long)(now_ms >> 32),
+        (unsigned long)now_ms,
+        (unsigned long)next_command_id++
+    );
+}
 
 static void close_socket(int *socket_fd)
 {
@@ -355,7 +369,7 @@ static bool read_http_response(
                 set_error(error, error_capacity, "invalid HTTP response");
                 return false;
             }
-            if (status_code != 200) {
+            if (status_code < 200 || status_code >= 300) {
                 if (error != NULL && error_capacity > 0) {
                     snprintf(
                         error,
@@ -686,6 +700,8 @@ bool network_post_bytes(
     int socket_fd = control_socket;
     bool success = false;
     bool reusable = false;
+    char command_id[48];
+    make_command_id(command_id, sizeof(command_id));
 
     do {
         char request_header[HTTP_REQUEST_HEADER_CAPACITY];
@@ -695,6 +711,8 @@ bool network_post_bytes(
             "POST %s HTTP/1.1\r\n"
             "Host: %s:%u\r\n"
             "User-Agent: 3gent/%s\r\n"
+            "X-3gent-Protocol-Version: %u\r\n"
+            "X-3gent-Command-Id: %s\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %u\r\n"
             "Connection: keep-alive\r\n"
@@ -703,6 +721,8 @@ bool network_post_bytes(
             host,
             (unsigned int)port,
             THREEGENT_APP_VERSION,
+            THREEGENT_PROTOCOL_VERSION,
+            command_id,
             content_type,
             (unsigned int)body_size
         );
@@ -753,6 +773,82 @@ bool network_post_bytes(
         success = true;
     } while (false);
 
+    if (!success || !reusable) {
+        close_socket(&control_socket);
+    }
+    return success;
+}
+
+bool network_get_text(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *response,
+    size_t response_capacity,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (!soc_ready) {
+        set_error(error, error_capacity, "network service is not initialized");
+        return false;
+    }
+    if (host == NULL || path == NULL || path[0] != '/') {
+        set_error(error, error_capacity, "invalid GET request");
+        return false;
+    }
+    if (control_socket < 0) {
+        control_socket = open_server_socket(
+            host,
+            port,
+            error,
+            error_capacity
+        );
+        if (control_socket < 0) {
+            return false;
+        }
+    }
+
+    char request_header[HTTP_REQUEST_HEADER_CAPACITY];
+    int request_size = snprintf(
+        request_header,
+        sizeof(request_header),
+        "GET %s HTTP/1.1\r\n"
+        "Host: %s:%u\r\n"
+        "User-Agent: 3gent/%s\r\n"
+        "X-3gent-Protocol-Version: %u\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        path,
+        host,
+        (unsigned int)port,
+        THREEGENT_APP_VERSION,
+        THREEGENT_PROTOCOL_VERSION
+    );
+    bool reusable = false;
+    bool success = request_size >= 0
+        && (size_t)request_size < sizeof(request_header)
+        && send_all(
+            control_socket,
+            request_header,
+            (size_t)request_size,
+            error,
+            error_capacity
+        )
+        && read_http_response(
+            control_socket,
+            response,
+            response_capacity,
+            error,
+            error_capacity,
+            NULL,
+            NULL,
+            &reusable
+        );
+    if (request_size < 0
+        || (size_t)request_size >= sizeof(request_header)) {
+        set_error(error, error_capacity, "GET header exceeded bounded buffer");
+    }
     if (!success || !reusable) {
         close_socket(&control_socket);
     }
@@ -829,12 +925,16 @@ bool network_audio_stream_begin(
     }
 
     char request_header[HTTP_REQUEST_HEADER_CAPACITY];
+    char command_id[48];
+    make_command_id(command_id, sizeof(command_id));
     int request_size = snprintf(
         request_header,
         sizeof(request_header),
         "POST %s HTTP/1.1\r\n"
         "Host: %s:%u\r\n"
         "User-Agent: 3gent/%s\r\n"
+        "X-3gent-Protocol-Version: %u\r\n"
+        "X-3gent-Command-Id: %s\r\n"
         "Content-Type: application/x-3gent-pcm; "
             "format=s16le; rate=16364; channels=1\r\n"
         "Transfer-Encoding: chunked\r\n"
@@ -843,7 +943,9 @@ bool network_audio_stream_begin(
         path,
         host,
         (unsigned int)port,
-        THREEGENT_APP_VERSION
+        THREEGENT_APP_VERSION,
+        THREEGENT_PROTOCOL_VERSION,
+        command_id
     );
     if (request_size < 0
         || (size_t)request_size >= sizeof(request_header)

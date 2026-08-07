@@ -1,10 +1,14 @@
-# 3gent Starter Pack Manifest
+# 3gent Repository Manifest
 
-Included files:
+Primary project boundaries:
 
 - `.gitignore`
 - `AGENTS.md`
 - `README.md`
+- `client-3ds/` — libctru thin client, build instructions, and hardware checks
+- `bridge/` — TypeScript/Node bridge, fake adapter, and automated tests
+- `protocol/` — machine-readable protocol-v1 schemas
+- `tools/dev-server/` — retained Stage 0 fixtures and tests
 - `docs/ARCHITECTURE.md`
 - `docs/DECISIONS.md`
 - `docs/INSPIRATION.md`
@@ -19,3 +23,6 @@ Included files:
 - `docs/adr/0002-codex-app-server.md`
 - `prompts/00_BOOTSTRAP_CODEX.md`
 - `prompts/01_NEXT_AFTER_STAGE0.md`
+
+Generated 3DS outputs, bridge dependencies/build output, WAV captures, and Python
+caches are intentionally excluded by `.gitignore`.

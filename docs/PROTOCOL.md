@@ -1,6 +1,6 @@
 # 3gent — Protocol Design Notes
 
-**Status:** Pre-v0 / intentionally not frozen
+**Status:** Stage 1 protocol v1 draft / intentionally evolvable
 
 The protocol must remain independent of Codex, Claude Code, Herdr, or any other specific runtime.
 
@@ -62,57 +62,136 @@ HTTP keep-alive as the production remote transport.
 
 Do not turn this disposable endpoint into the production protocol by accident.
 
-## 4. Event model draft
+## 4. Stage 1 transport
 
-Later structured control events should have:
+The local vertical slice uses persistent HTTP/1.1 connections:
+
+- bounded request/response commands on the command connection;
+- chunked PCM upload on the audio connection;
+- short cursor-based event polls when the command connection is idle.
+
+Every Stage 1 request sends:
+
+```text
+X-3gent-Protocol-Version: 1
+```
+
+Mutating commands also send a bounded unique command ID:
+
+```text
+X-3gent-Command-Id: cmd_3ds_000001
+```
+
+The bridge remembers a bounded set of command IDs. Repeating an accepted command
+ID returns the original acknowledgement without running the command twice.
+
+This is a local transport experiment. Protocol messages are independent from the
+transport and the remote path must later add standard authenticated encryption.
+
+## 5. Envelope
+
+Structured control events have:
 
 ```json
 {
   "protocolVersion": 1,
-  "eventId": "evt_...",
-  "sessionId": "ses_...",
+  "eventId": "evt_000001",
+  "sequence": 1,
+  "sessionId": "ses_fake_local",
   "type": "assistant.text.delta",
-  "payload": {}
+  "createdAt": "2026-08-07T22:00:00.000Z",
+  "payload": {"text": "Hello"}
 }
 ```
 
-Useful properties:
-- `eventId` for dedupe;
-- `sessionId` for routing;
-- protocol version;
-- monotonically increasing sequence number per stream/session if replay requires it.
+Rules:
 
-## 5. Draft client commands
+- `protocolVersion` is required and currently equals `1`;
+- `eventId` is globally unique enough for client deduplication;
+- `sequence` is strictly increasing within one session;
+- `sessionId` routes the event and is never inferred from UI state;
+- `type` is an agent-agnostic event name;
+- `createdAt` is informational bridge time, not an ordering primitive;
+- `payload` is an object whose shape is defined by `type`;
+- unknown event types are ignored after advancing the cursor;
+- each encoded event line is at most 640 UTF-8 bytes;
+- event count per batch is bounded by the requested limit, up to 32.
+
+Event polls return UTF-8 newline-delimited JSON (`application/x-ndjson`). A client
+requests only events after the last sequence it has successfully applied:
 
 ```text
-session.list
-session.open
-capture.create
-capture.upload
-turn.interrupt
-approval.respond
-ping
+GET /v1/events?sessionId=ses_fake_local&after=12&limit=8
 ```
 
-## 6. Draft server events
+An empty poll has a zero-byte body. The bridge retains 256 events per session in
+Stage 1. If `after` is older than retained history, it returns
+`EVENT_CURSOR_EXPIRED`. If it is newer than the latest event—for example, after
+an in-memory bridge restart—it returns `EVENT_CURSOR_AHEAD`. The client then
+fetches the current session snapshot, advances to its `lastSequence`, and
+visibly reports that skipped history cannot be reconstructed.
+
+## 6. Stage 1 commands
+
+```text
+GET  /health
+GET  /v1/sessions
+GET  /v1/sessions/:sessionId
+GET  /v1/events?sessionId=...&after=...&limit=...
+POST /v1/sessions/:sessionId/captures/text
+POST /v1/sessions/:sessionId/captures/audio
+POST /v1/sessions/:sessionId/turns/current/interrupt
+POST /v1/sessions/:sessionId/approvals/:approvalId/respond
+```
+
+Text capture bodies are UTF-8 `text/plain` and bounded to 4 KiB. Audio uses the
+Stage 0 measured signed PCM16 mono stream at 16,364 Hz and remains bounded to five
+minutes. Approval responses use JSON:
+
+```json
+{"choice":"approve_once"}
+```
+
+Successful mutations return a command acknowledgement:
+
+```json
+{
+  "protocolVersion": 1,
+  "commandId": "cmd_3ds_000001",
+  "accepted": true,
+  "duplicate": false,
+  "sessionId": "ses_fake_local",
+  "lastSequence": 3
+}
+```
+
+## 7. Stage 1 server events
 
 ```text
 connection.ready
-session.list
 session.updated
 turn.started
 assistant.text.delta
 assistant.text.completed
 approval.requested
 approval.resolved
-diff.updated
 capture.accepted
 capture.progress
+turn.interrupted
 turn.completed
 error
 ```
 
-## 7. Approvals
+Normalized session states are:
+
+```text
+offline | idle | working | waiting_for_user | completed | failed
+```
+
+The fake adapter uses `idle`, `working`, and `waiting_for_user`. Later adapters
+may use every state without changing the 3DS protocol.
+
+## 8. Approvals
 
 An approval event needs enough information to render safely without exposing an entire terminal screen.
 
@@ -135,7 +214,25 @@ Conceptually:
 
 The client never decides which choices are valid by itself. The bridge sends allowed choices.
 
-## 8. Media
+## 9. Errors
+
+Protocol errors are bounded JSON and never expose a stack trace:
+
+```json
+{
+  "protocolVersion": 1,
+  "error": {
+    "code": "SESSION_BUSY",
+    "message": "session already has an active turn",
+    "retryable": true
+  }
+}
+```
+
+HTTP status still communicates the broad class. The error code is the stable
+application-level branch.
+
+## 10. Media
 
 Media should have:
 - capture ID;
@@ -148,7 +245,7 @@ Media should have:
 
 Do not base64 large media inside normal JSON events unless a benchmark shows that it is acceptable.
 
-## 9. Transport decision is pending
+## 11. Transport decision is pending
 
 Candidates must be tested on actual hardware.
 

@@ -33,18 +33,21 @@ Do not violate these without an explicit architecture decision:
 
 ## Current development phase
 
-The current priority is **Stage 0 feasibility**.
+The current priority is **Stage 1: local fake-agent vertical slice**. The Stage 0
+keyboard, LAN, incremental-rendering, scrolling, microphone, and low-latency
+connection proofs have passed on physical hardware.
 
-Prove these independently:
+Prove this end-to-end on the 3DS:
 
-1. Basic 3DS app builds and launches.
-2. Native software keyboard returns text.
-3. Local networking can send a small request and receive a response.
-4. Response text can be rendered incrementally.
-5. Microphone audio can be captured into a bounded buffer/file.
-6. QR scanning feasibility can be tested later without blocking the first network loop.
+1. Text and voice become protocol-versioned Captures.
+2. The TypeScript bridge owns the session and fake-agent adapter.
+3. Ordered text deltas and state events render through a reconnectable cursor.
+4. An active turn can be interrupted.
+5. A structured fake approval can be approved or declined.
+6. Client memory and protocol payloads remain bounded.
 
-Do not build the relay, production auth, or multiple agent adapters before these are proven.
+Do not build the relay, production auth, or a real agent adapter until the Stage
+1 hardware checklist passes.
 
 ## 3DS implementation expectations
 
@@ -96,9 +99,9 @@ For each implementation task:
 6. Update `docs/RESEARCH.md` when a feasibility question is answered.
 7. Update `docs/DECISIONS.md` when a design decision is actually made.
 
-## Definition of done for Stage 0 changes
+## Definition of done for current-stage changes
 
-A Stage 0 spike is done when:
+A current-stage slice is done when:
 
 - It builds reproducibly.
 - The hardware test procedure is written down.

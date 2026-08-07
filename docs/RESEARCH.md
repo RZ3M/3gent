@@ -96,7 +96,7 @@
 
 **Question:** What is the simplest reliable way to send a small request from 3DS homebrew to a LAN server?
 
-**Status:** CORE LAN ROUND TRIP HARDWARE PASS / LATENCY RETEST TODO
+**Status:** CORE LAN AND LOW-LATENCY HARDWARE PASS / FAILURE PATHS TODO
 
 Test:
 - DNS if needed;
@@ -178,6 +178,17 @@ Do not use this experiment as the production remote security design.
 - Host result: the development server reuses a single connection for repeated
   echo and audio requests in automated tests. The 3DS client builds with the
   configured toolchain; hardware confirmation remains required.
+
+**2026-08-07 low-latency hardware retest:**
+
+- The user tested the warm-connection revision on the physical 3DS and reported
+  that both text messaging and microphone startup now respond quickly and work
+  well.
+- No exact on-screen millisecond values were recorded, so the qualitative pass
+  does not establish a numeric latency budget.
+- Conclusion: reuse of separate warm command and audio connections is proven
+  useful on the tested LAN. Eleven-minute idle recovery, bridge restart, network
+  loss, and the exact hardware model remain open measurements.
 
 ---
 
@@ -453,6 +464,50 @@ Herdr exposes agent-aware control primitives over persistent terminal panes and 
 - best stable API/CLI boundary;
 - mapping Herdr workspace/tab/pane/agent to 3gent sessions;
 - whether Herdr should expose sessions alongside direct adapters or act as one adapter.
+
+---
+
+## R-013 — Stage 1 local bridge and protocol
+
+**Question:** Can the proven handheld paths support a production-shaped,
+agent-agnostic local session loop before a real agent is introduced?
+
+**Status:** HOST PASS / PHYSICAL 3DS VERTICAL-SLICE TEST TODO
+
+**2026-08-07 implementation record:**
+
+- Implemented the desktop bridge in strict TypeScript on Node.js 22+ with no
+  runtime dependencies.
+- Protocol v1 uses explicit version and command-ID headers, bounded command
+  bodies, 202 acknowledgements, NDJSON event envelopes, monotonically
+  increasing per-session sequences, a 256-event replay window, and a 256-command
+  deduplication window.
+- The deterministic fake adapter exposes one session and exercises text deltas,
+  working/idle/waiting states, interruption, approve/decline behavior, and the
+  existing streamed microphone/WAV path.
+- Nine automated tests pass for version enforcement, session discovery,
+  ordered event streaming/replay, text and audio command deduplication,
+  approvals, interruption, WAV output, invalid cursors, and oversized events.
+- The `0.1.0-stage1` 3DS client sends protocol-v1 commands, polls up to three
+  events roughly every 100 ms over its warm control connection, ignores unknown
+  event types after advancing its cursor, renders text deltas, and exposes the
+  Stage 1 controls. Event and display buffers remain fixed-size.
+- A size audit found that one eight-event approval batch could reach 2,024 bytes,
+  leaving too little margin in the 2 KiB client buffer. Protocol v1 now rejects
+  event lines over 640 UTF-8 bytes, and the handheld requests at most three per
+  poll, bounding a valid batch to 1,923 bytes including newline delimiters. The
+  largest current fake event measured 598 bytes with a maximum-length prompt.
+- Host result: the TypeScript build/tests pass and the client compiles with
+  devkitARM r68-1 and libctru 2.7.0-1 for bridge address `10.0.0.196:8080`.
+- A cursor older than retained history or ahead of a restarted in-memory stream
+  is rejected explicitly. The 3DS then fetches a bounded session snapshot and
+  visibly resynchronizes at its latest sequence instead of silently stalling.
+- Unproven: physical event parsing/rendering, approval ergonomics, interruption
+  timing, Stage 1 audio behavior, cursor resync behavior, long-idle socket
+  recovery, server restart, sleep/resume, and Old versus New 3DS performance.
+
+**Conclusion:** the host-side vertical slice is reproducible and bounded. Do
+not begin the Codex adapter until the main physical Stage 1 checklist passes.
 
 ---
 

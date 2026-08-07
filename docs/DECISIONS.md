@@ -76,26 +76,20 @@ QR code is the default pairing UX. Manual pairing remains a fallback.
 
 Prefer Codex app-server through the desktop bridge over terminal scraping.
 
+### D-013 — TypeScript/Node desktop bridge
+
+**Status:** Accepted
+
+The first production-shaped desktop bridge uses TypeScript on a supported Node.js
+LTS release. It keeps Stage 1 iteration fast, fits the JSON/event-oriented
+protocol, and provides a straightforward subprocess and JSON-RPC boundary for
+agent adapters. Agent-specific objects still stop at the adapter boundary.
+
+This does not require the relay or every future component to use TypeScript.
+
 ---
 
 ## Proposed
-
-### D-P01 — Desktop bridge language
-
-**Status:** Proposed
-
-Candidate A: TypeScript/Node
-- fast iteration;
-- strong JSON-RPC/subprocess ecosystem;
-- easy web/relay sharing.
-
-Candidate B: Rust
-- single binary;
-- lower overhead;
-- strong long-term systems properties;
-- more implementation friction.
-
-Do not lock this merely to complete Stage 0. The Stage 0 echo server can be disposable.
 
 ### D-P02 — Old 3DS support
 
@@ -171,7 +165,24 @@ Candidate B: maintain persistent connections while the app is active.
 - requires framing, idle-connection detection, reconnection, and separate media
   and control flow handling.
 
-Version `0.0.8-stage0` tests Candidate B using two warm HTTP/1.1 connections and
-`Content-Length` response framing. This is reversible and does not accept the
-production transport; WebSocket, a small persistent socket protocol, and remote
-encrypted transports remain open candidates.
+Version `0.0.8-stage0` tested Candidate B using two warm HTTP/1.1 connections and
+`Content-Length` response framing. The physical retest passed and the user
+reported that text and audio startup felt responsive. Stage 1 therefore keeps
+the two warm local connections. This does not accept a production remote
+transport; WebSocket, a small persistent socket protocol, and encrypted remote
+transports remain open candidates.
+
+### D-P10 — Stage 1 event delivery
+
+**Status:** Proposed / local vertical-slice experiment
+
+Stage 1 uses persistent HTTP/1.1 for bounded commands and cursor-based polling
+for newline-delimited JSON event batches. Per-session sequence numbers allow a
+client to request events after its last applied cursor and replay a bounded
+history after a short disconnect.
+
+This choice reuses the low-latency socket behavior proven on physical 3DS
+hardware and keeps commands available while the fake agent runs. It does not
+select the final encrypted remote transport. Long polling, WebSocket, or another
+framed persistent transport may replace the polling layer after hardware and
+relay measurements.

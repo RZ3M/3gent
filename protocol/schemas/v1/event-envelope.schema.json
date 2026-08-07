@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://3gent.dev/schemas/v1/event-envelope.schema.json",
+  "title": "3gent protocol v1 event envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocolVersion",
+    "eventId",
+    "sequence",
+    "sessionId",
+    "type",
+    "createdAt",
+    "payload"
+  ],
+  "properties": {
+    "protocolVersion": {"const": 1},
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^evt_[A-Za-z0-9_-]+$"
+    },
+    "sequence": {"type": "integer", "minimum": 1},
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^ses_[A-Za-z0-9_-]+$"
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z]+(?:[._][a-z]+)*$"
+    },
+    "createdAt": {"type": "string", "format": "date-time"},
+    "payload": {"type": "object"}
+  }
+}

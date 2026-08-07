@@ -119,6 +119,22 @@ Bottom:
 
 Exact buttons are pending usability testing.
 
+### Stage 1 hardware mapping
+
+The local fake-agent slice deliberately uses a small mapping while the event
+model is tested:
+
+- `A`: open the native keyboard and send text;
+- hold `R`: stream a voice capture and send on release;
+- `X`: approve once when an approval is pending, otherwise start the fake
+  approval demo;
+- `B`: decline a pending approval, otherwise interrupt the active turn;
+- D-pad/Circle Pad Up/Down: scroll, including held-button repeat;
+- `START`: exit the development app.
+
+This is not the final product mapping. In particular, approval ergonomics and a
+dedicated stop action still require hardware usability testing.
+
 ## 8. Camera and QR
 
 Pairing:
