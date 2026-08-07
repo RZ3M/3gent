@@ -30,14 +30,14 @@ The Stage 0A-D implementation now lives in `client-3ds/` and
 - native software keyboard input;
 - a bounded, timeout-controlled local HTTP request;
 - visible connecting, success, cancellation, and error states;
-- incremental response rendering with bounded scrollback and D-pad navigation;
+- incremental response rendering with bounded scrollback and held-button navigation;
 - a standard-library development echo server with automated tests.
 
-The keyboard and LAN echo loop have passed on physical 3DS hardware. The
-development server tests pass on the host, the 3DS application builds with
-devkitARM r68 and libctru 2.7.0, and the same build passes in CI using devkitPro's
-official toolchain container. Incremental rendering still requires its hardware
-check before Stage 0D is considered proven.
+The keyboard, LAN echo loop, incremental rendering, and scroll navigation have
+passed on physical 3DS hardware. The development server tests pass on the host,
+the 3DS application builds with devkitARM r68 and libctru 2.7.0, and the same
+build passes in CI using devkitPro's official toolchain container. Held-button
+scroll repeat was added from hardware feedback and still needs its focused retest.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical test checklist. See [`tools/dev-server/README.md`](tools/dev-server/README.md)

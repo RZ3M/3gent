@@ -158,7 +158,7 @@ Do not use this experiment as the production remote security design.
 
 **Question:** Can responses be appended and scrolled smoothly enough for agent output?
 
-**Status:** IMPLEMENTED / HOST BUILD PASSED / HARDWARE TODO
+**Status:** CORE HARDWARE PASS / HELD SCROLL RETEST TODO
 
 Measure:
 - text wrapping;
@@ -182,8 +182,21 @@ Measure:
 - Host result: the 3DSX builds cleanly and the five development-server tests pass.
 - Host stream measurement: 1,424 response bytes delivered in 2.28 seconds across
   28 flushed application chunks.
-- Update cadence, visual smoothness, wrapping, and scrolling still require the
-  physical hardware checklist.
+
+**2026-08-07 hardware result:**
+
+- The user confirmed that the deliberately streamed response rendered
+  incrementally and completed successfully on the physical 3DS.
+- Wrapped response navigation worked in both directions using individual input
+  presses.
+- Hardware feedback identified that holding a direction did not repeat, making
+  longer navigation unnecessarily slow.
+- Version `0.0.4-stage0` adds bounded held-direction repeat: one immediate step,
+  an 18-frame initial delay, and one step every four frames while held. Opposing
+  directions cancel repeat until only one direction remains active.
+- Conclusion: incremental rendering, wrapping, and basic scroll navigation are
+  proven on hardware. The new held-button behavior requires a focused hardware
+  retest; hardware model and subjective update smoothness remain to be recorded.
 
 ---
 

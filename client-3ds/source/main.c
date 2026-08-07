@@ -10,6 +10,8 @@
 #define RESPONSE_WRAP_COLUMNS 48
 #define RESPONSE_MAX_LINES 64
 #define RESPONSE_VISIBLE_LINES 22
+#define SCROLL_REPEAT_DELAY_FRAMES 18
+#define SCROLL_REPEAT_INTERVAL_FRAMES 4
 
 static PrintConsole top_console;
 static PrintConsole bottom_console;
@@ -21,6 +23,8 @@ static char view_state[32] = "Ready";
 static char wrapped_lines[RESPONSE_MAX_LINES][RESPONSE_WRAP_COLUMNS + 1];
 static bool network_ready;
 static size_t response_scroll_lines;
+static int scroll_repeat_direction;
+static u32 scroll_repeat_frames;
 
 static void set_view_state(const char *state)
 {
@@ -249,6 +253,46 @@ static void change_scroll(bool scroll_up)
     redraw();
 }
 
+static void handle_scroll_input(u32 keys_down, u32 keys_held)
+{
+    const u32 scroll_up_keys = KEY_DUP | KEY_CPAD_UP;
+    const u32 scroll_down_keys = KEY_DDOWN | KEY_CPAD_DOWN;
+    const u32 active_keys = keys_down | keys_held;
+    const bool up_held = (active_keys & scroll_up_keys) != 0;
+    const bool down_held = (active_keys & scroll_down_keys) != 0;
+    int direction = 0;
+
+    if (up_held && !down_held) {
+        direction = 1;
+    } else if (down_held && !up_held) {
+        direction = -1;
+    }
+
+    if (direction == 0) {
+        scroll_repeat_direction = 0;
+        scroll_repeat_frames = 0;
+        return;
+    }
+
+    const bool direction_pressed = direction > 0
+        ? (keys_down & scroll_up_keys) != 0
+        : (keys_down & scroll_down_keys) != 0;
+
+    if (direction_pressed || direction != scroll_repeat_direction) {
+        change_scroll(direction > 0);
+        scroll_repeat_direction = direction;
+        scroll_repeat_frames = 0;
+        return;
+    }
+
+    scroll_repeat_frames++;
+    if (scroll_repeat_frames >= SCROLL_REPEAT_DELAY_FRAMES
+        && (scroll_repeat_frames - SCROLL_REPEAT_DELAY_FRAMES)
+            % SCROLL_REPEAT_INTERVAL_FRAMES == 0) {
+        change_scroll(direction > 0);
+    }
+}
+
 int main(int argc, char **argv)
 {
     (void)argc;
@@ -264,6 +308,7 @@ int main(int argc, char **argv)
     while (aptMainLoop()) {
         hidScanInput();
         u32 keys_down = hidKeysDown();
+        u32 keys_held = hidKeysHeld();
 
         if ((keys_down & KEY_START) != 0) {
             break;
@@ -294,12 +339,7 @@ int main(int argc, char **argv)
             run_request("/stream", "Stream complete");
         }
 
-        if ((keys_down & (KEY_DUP | KEY_CPAD_UP)) != 0) {
-            change_scroll(true);
-        }
-        if ((keys_down & (KEY_DDOWN | KEY_CPAD_DOWN)) != 0) {
-            change_scroll(false);
-        }
+        handle_scroll_input(keys_down, keys_held);
 
         present_frame();
     }

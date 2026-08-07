@@ -8,8 +8,9 @@ This client tests the first four 3DS boundaries:
 4. append, wrap, and scroll a deliberately streamed response.
 
 This is a development spike, not the production bridge or protocol. The basic
-keyboard and LAN echo path has passed on physical hardware; the incremental
-output controls still need their hardware check.
+keyboard, LAN echo path, incremental rendering, and scroll navigation have
+passed on physical hardware. Held-button scroll repeat still needs its focused
+hardware check.
 
 ## Prerequisites
 
@@ -78,7 +79,7 @@ with the result.
 2. Launch 3gent from the Homebrew Launcher.
 3. Confirm that both screens clear and render without corruption.
 4. Confirm that the top screen shows `3gent`, `Stage 0D`, and version
-   `0.0.3-stage0`.
+   `0.0.4-stage0`.
 5. Confirm that the bottom screen shows the configured IP address and reports the
    network service as ready.
 6. Press `A`; confirm that the native software keyboard opens.
@@ -90,8 +91,9 @@ with the result.
     `hello from 3gent dev server: hello`.
 12. Press `X`; confirm that text appears in multiple visible updates over roughly
     two seconds and finishes with `Stream complete`.
-13. Press D-pad Up and Down; confirm that older and newer wrapped response lines
-    are readable and that the bottom screen reports the scroll position.
+13. Press and hold D-pad or Circle Pad Up and Down; confirm that scrolling moves
+    once immediately, repeats after a short delay, stops on release, and that the
+    bottom screen reports the scroll position.
 14. Stop the server and send again; confirm that an error or timeout appears
     within roughly five seconds.
 15. Restart the server and confirm that `A` or `X` retries successfully without
