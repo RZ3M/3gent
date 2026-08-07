@@ -158,7 +158,7 @@ Do not use this experiment as the production remote security design.
 
 **Question:** Can responses be appended and scrolled smoothly enough for agent output?
 
-**Status:** CORE HARDWARE PASS / HELD SCROLL RETEST TODO
+**Status:** CORE HARDWARE PASS
 
 Measure:
 - text wrapping;
@@ -194,9 +194,11 @@ Measure:
 - Version `0.0.4-stage0` adds bounded held-direction repeat: one immediate step,
   an 18-frame initial delay, and one step every four frames while held. Opposing
   directions cancel repeat until only one direction remains active.
-- Conclusion: incremental rendering, wrapping, and basic scroll navigation are
-  proven on hardware. The new held-button behavior requires a focused hardware
-  retest; hardware model and subjective update smoothness remain to be recorded.
+- The user completed the focused `0.0.4-stage0` retest and reported that held
+  scrolling works correctly and the app is working well.
+- Conclusion: incremental rendering, wrapping, and held scroll navigation are
+  proven on hardware. Hardware model and subjective update smoothness remain to
+  be recorded.
 
 ---
 
@@ -204,7 +206,7 @@ Measure:
 
 **Question:** Can we reliably record push-to-talk audio into bounded memory/storage?
 
-**Status:** TODO
+**Status:** IMPLEMENTED / HOST BUILD AND ENDPOINT PASS / HARDWARE TODO
 
 Determine:
 - actual libctru microphone API to use;
@@ -216,6 +218,38 @@ Determine:
 - sleep/interruption behavior.
 
 Start with raw/simple capture. Compression is a later optimization.
+
+**2026-08-07 implementation record:**
+
+- Primary reference: the locally installed official devkitPro microphone example
+  from `3ds-examples` 20240917-1, checked against the MIC header in libctru
+  2.7.0-1.
+- API: `micInit`, `MICU_StartSampling`, `micGetLastSampleOffset`,
+  `MICU_StopSampling`, and `micExit`. No microphone gain override is applied.
+- Format: `MICU_ENCODING_PCM16_SIGNED`, mono, using
+  `MICU_SAMPLE_RATE_16360`. Current libctru documents its actual rate as
+  approximately 16,364.479 Hz; the standard WAV header uses the rounded integer
+  value 16,364 Hz.
+- Interaction: hold `R` to record and release to stop and upload. The bottom
+  screen shows a duration and recent peak-level indicator. `Y` retries upload of
+  the most recent completed capture.
+- Bound: ten seconds, comprising at most 327,280 PCM bytes and a 44-byte WAV
+  header. Capture stops automatically when full and does not upload until `R` is
+  released.
+- Microphone memory: a 196,608-byte, 0x1000-aligned looping service buffer plus
+  a fixed 327,324-byte WAV buffer, for 523,932 bytes dedicated to this spike.
+- Validation: `POST /audio` accepts at most 384 KiB, verifies non-empty mono
+  PCM16 WAV data at 16,364 Hz using Python's standard library, and atomically
+  saves `tools/dev-server/captures/latest.wav` for audible inspection.
+- Failure behavior: MIC service/start/stop errors are visible on screen. A
+  network upload failure retains the completed bounded WAV and exposes retry
+  through `Y`.
+- Host result: the 3DS client builds cleanly with devkitARM r68-1 and libctru
+  2.7.0-1. Nine development-server tests pass, including valid audio saving,
+  invalid/truncated WAV rejection, and oversized audio rejection.
+- Hardware status: microphone initialization, level behavior, captured quality,
+  exact duration/byte count, maximum-duration stop, upload latency, shell-close
+  behavior, and Old/New 3DS model remain unmeasured. No hardware pass is claimed.
 
 ---
 

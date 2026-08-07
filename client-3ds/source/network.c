@@ -20,7 +20,7 @@
 
 #define SOC_ALIGNMENT 0x1000
 #define SOC_BUFFER_SIZE 0x100000
-#define HTTP_REQUEST_CAPACITY 1024
+#define HTTP_REQUEST_HEADER_CAPACITY 1024
 #define HTTP_RESPONSE_CAPACITY 4096
 
 static u32 *soc_buffer = NULL;
@@ -405,11 +405,13 @@ static bool read_http_response(
     return true;
 }
 
-bool network_post_text(
+bool network_post_bytes(
     const char *host,
     unsigned short port,
     const char *path,
-    const char *message,
+    const char *content_type,
+    const void *body,
+    size_t body_size,
     char *response,
     size_t response_capacity,
     char *error,
@@ -422,7 +424,8 @@ bool network_post_text(
         set_error(error, error_capacity, "network service is not initialized");
         return false;
     }
-    if (host == NULL || path == NULL || path[0] != '/' || message == NULL) {
+    if (host == NULL || path == NULL || path[0] != '/'
+        || content_type == NULL || (body == NULL && body_size != 0)) {
         set_error(error, error_capacity, "invalid network request");
         return false;
     }
@@ -456,36 +459,49 @@ bool network_post_text(
             break;
         }
 
-        char request[HTTP_REQUEST_CAPACITY];
-        size_t message_size = strlen(message);
+        char request_header[HTTP_REQUEST_HEADER_CAPACITY];
         int request_size = snprintf(
-            request,
-            sizeof(request),
+            request_header,
+            sizeof(request_header),
             "POST %s HTTP/1.1\r\n"
             "Host: %s:%u\r\n"
             "User-Agent: 3gent/%s\r\n"
-            "Content-Type: text/plain; charset=utf-8\r\n"
+            "Content-Type: %s\r\n"
             "Content-Length: %u\r\n"
             "Connection: close\r\n"
-            "\r\n"
-            "%s",
+            "\r\n",
             path,
             host,
             (unsigned int)port,
             THREEGENT_APP_VERSION,
-            (unsigned int)message_size,
-            message
+            content_type,
+            (unsigned int)body_size
         );
 
-        if (request_size < 0 || (size_t)request_size >= sizeof(request)) {
-            set_error(error, error_capacity, "HTTP request exceeded the bounded buffer");
+        if (request_size < 0
+            || (size_t)request_size >= sizeof(request_header)) {
+            set_error(
+                error,
+                error_capacity,
+                "HTTP request header exceeded the bounded buffer"
+            );
             break;
         }
 
         if (!send_all(
                 socket_fd,
-                request,
+                request_header,
                 (size_t)request_size,
+                error,
+                error_capacity
+            )) {
+            break;
+        }
+
+        if (body_size > 0 && !send_all(
+                socket_fd,
+                (const char *)body,
+                body_size,
                 error,
                 error_capacity
             )) {
@@ -509,4 +525,38 @@ bool network_post_text(
 
     close(socket_fd);
     return success;
+}
+
+bool network_post_text(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    const char *message,
+    char *response,
+    size_t response_capacity,
+    char *error,
+    size_t error_capacity,
+    NetworkProgressCallback progress_callback,
+    void *progress_user_data
+)
+{
+    if (message == NULL) {
+        set_error(error, error_capacity, "invalid text request");
+        return false;
+    }
+
+    return network_post_bytes(
+        host,
+        port,
+        path,
+        "text/plain; charset=utf-8",
+        message,
+        strlen(message),
+        response,
+        response_capacity,
+        error,
+        error_capacity,
+        progress_callback,
+        progress_user_data
+    );
 }

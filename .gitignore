@@ -11,3 +11,4 @@ client-3ds/*.smdh
 __pycache__/
 *.py[cod]
 .venv/
+tools/dev-server/captures/

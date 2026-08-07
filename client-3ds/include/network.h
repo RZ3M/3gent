@@ -22,4 +22,19 @@ bool network_post_text(
     void *progress_user_data
 );
 
+bool network_post_bytes(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    const char *content_type,
+    const void *body,
+    size_t body_size,
+    char *response,
+    size_t response_capacity,
+    char *error,
+    size_t error_capacity,
+    NetworkProgressCallback progress_callback,
+    void *progress_user_data
+);
+
 #endif

@@ -19,11 +19,13 @@ The first milestone is deliberately tiny:
 5. Receive a response.
 6. Display that response incrementally on the 3DS.
 
-After that works, add microphone capture and the real desktop bridge.
+The keyboard, networking, and incremental-output loop now work on hardware. The
+bounded microphone implementation is ready for its physical test; the real
+desktop bridge comes after Stage 0 is verified.
 
 ## Stage 0 implementation status
 
-The Stage 0A-D implementation now lives in `client-3ds/` and
+The Stage 0A-E implementation now lives in `client-3ds/` and
 `tools/dev-server/`. It includes:
 
 - a minimal top/bottom-screen 3DS application;
@@ -31,13 +33,17 @@ The Stage 0A-D implementation now lives in `client-3ds/` and
 - a bounded, timeout-controlled local HTTP request;
 - visible connecting, success, cancellation, and error states;
 - incremental response rendering with bounded scrollback and held-button navigation;
-- a standard-library development echo server with automated tests.
+- bounded push-to-talk microphone capture and WAV upload;
+- a standard-library development server with automated tests and inspectable
+  audio output.
 
 The keyboard, LAN echo loop, incremental rendering, and scroll navigation have
 passed on physical 3DS hardware. The development server tests pass on the host,
 the 3DS application builds with devkitARM r68 and libctru 2.7.0, and the same
 build passes in CI using devkitPro's official toolchain container. Held-button
-scroll repeat was added from hardware feedback and still needs its focused retest.
+scroll repeat also passed its focused hardware retest. The Stage 0E microphone
+path builds and passes host-side endpoint tests; capture quality and service
+behavior now require the physical hardware checklist.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical test checklist. See [`tools/dev-server/README.md`](tools/dev-server/README.md)

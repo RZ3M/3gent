@@ -1,8 +1,8 @@
 # Stage 0 development server
 
 This is a disposable, standard-library HTTP server for the local 3DS networking
-spike. It is not the desktop bridge and has no authentication or production
-security.
+and microphone spikes. It is not the desktop bridge and has no authentication
+or production security.
 
 ## Run
 
@@ -23,6 +23,11 @@ python3 tools/dev-server/server.py --host 0.0.0.0 --port 8080
 Binding to `0.0.0.0` exposes the unauthenticated endpoint to devices that can
 reach the computer. Use only disposable test text and stop the server after the
 test.
+
+By default, a valid microphone upload is written to
+`tools/dev-server/captures/latest.wav`. Use `--capture-dir PATH` to select a
+different output directory. A successful upload atomically replaces the prior
+`latest.wav`.
 
 ## Check from the computer
 
@@ -49,7 +54,7 @@ python3 -m unittest discover -s tools/dev-server -p 'test_*.py' -v
 ```
 
 The tests cover health, UTF-8 echo, the incremental stream fixture, unknown
-paths, and the 4 KiB request limit.
+paths, text and audio size limits, WAV validation, and audio saving.
 
 ## Interface
 
@@ -57,6 +62,8 @@ paths, and the 4 KiB request limit.
 - `POST /echo` accepts `text/plain` UTF-8 and returns a prefixed copy.
 - `POST /stream` returns a bounded multi-part fixture over roughly two seconds
   so the 3DS can prove incremental rendering and scrollback.
-- Requests larger than 4 KiB are rejected.
+- `POST /audio` accepts a non-empty mono PCM16 WAV at 16,364 Hz, saves it as
+  `latest.wav`, and rejects audio larger than 384 KiB.
+- Text requests larger than 4 KiB are rejected.
 - Responses include `Content-Length` and close the connection so the Stage 0
   client can parse them simply and predictably.
