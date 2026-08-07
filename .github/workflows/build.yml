@@ -9,8 +9,8 @@ jobs:
   dev-server:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Test Stage 0 development server
@@ -20,10 +20,10 @@ jobs:
     runs-on: ubuntu-latest
     container: devkitpro/devkitarm:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build 3DSX with the current official toolchain image
         run: make -C client-3ds SERVER_HOST=192.0.2.1 SERVER_PORT=8080
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: 3gent-stage0
           path: |
