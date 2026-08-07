@@ -32,9 +32,10 @@ The Stage 0A-C implementation now lives in `client-3ds/` and
 - visible connecting, success, cancellation, and error states;
 - a standard-library development echo server with automated tests.
 
-The development server tests pass on the host. The 3DS application still needs
-to be built with the official devkitPro toolchain and verified on physical
-hardware before the related feasibility questions can be marked proven.
+The development server tests pass on the host. The 3DS application builds with
+devkitARM r68 and libctru 2.7.0, and the same build passes in CI using devkitPro's
+official toolchain container. Physical-hardware verification is still required
+before the related feasibility questions can be marked proven.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical test checklist. See [`tools/dev-server/README.md`](tools/dev-server/README.md)

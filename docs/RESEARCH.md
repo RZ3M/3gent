@@ -6,7 +6,7 @@
 
 **Question:** Can we build and launch a minimal 3DSX with the current devkitPro toolchain?
 
-**Status:** IMPLEMENTED / HOST BUILD BLOCKED / HARDWARE TODO
+**Status:** HOST BUILD PASSED / HARDWARE TODO
 
 **Success:**
 - reproducible build command;
@@ -21,7 +21,7 @@
 - build output;
 - problems/workarounds.
 
-**2026-08-07 implementation record:**
+**2026-08-07 initial environment record:**
 
 - Host: macOS 26.5.2, Darwin 25.5.0, arm64.
 - Tool inspection: `DEVKITPRO`, `DEVKITARM`, `dkp-pacman`,
@@ -32,6 +32,22 @@
   set. No compiler result or hardware behavior is being claimed.
 - Follow-up: install the official devkitPro macOS pacman package and `3ds-dev`
   group, build, and complete the checklist in `client-3ds/README.md`.
+
+**2026-08-07 host build record:**
+
+- Installed packages: devkitARM r68-1, libctru 2.7.0-1, 3dstools 1.3.1-3,
+  and 3dslink 0.6.3-1.
+- Procedure: `make clean`, then
+  `make SERVER_HOST=192.0.2.1 SERVER_PORT=8080` in `client-3ds/`.
+- Result: successful compilation and link with no warnings; generated
+  `3gent.3dsx`, `3gent.smdh`, `3gent.elf`, and `build/3gent.map`.
+- Size: ELF sections total 202,568 bytes; the generated 3DSX is approximately
+  198 KiB.
+- Independent check: the public GitHub workflow also built the 3DS client and
+  passed all development-server tests using devkitPro's official current
+  devkitARM container.
+- Conclusion: reproducible host compilation is proven. Launch, rendering, input,
+  and clean exit still require the physical-hardware checklist.
 
 ---
 

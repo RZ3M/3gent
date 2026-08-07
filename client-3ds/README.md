@@ -45,7 +45,7 @@ Produced files:
 
 - `3gent.3dsx` — Homebrew Launcher application;
 - `3gent.smdh` — application metadata;
-- `3gent.elf` and `3gent.map` — development outputs.
+- `3gent.elf` and `build/3gent.map` — development outputs.
 
 Run `make clean` to remove generated files.
 
