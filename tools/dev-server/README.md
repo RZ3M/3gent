@@ -59,7 +59,8 @@ python3 -m unittest discover -s tools/dev-server -p 'test_*.py' -v
 ```
 
 The tests cover health, UTF-8 echo, the incremental output fixture, unknown
-paths, streamed PCM framing/format/size limits, and WAV finalization.
+paths, streamed PCM framing/format/size limits, WAV finalization, and connection
+reuse for both text and audio.
 
 ## Interface
 
@@ -70,5 +71,8 @@ paths, streamed PCM framing/format/size limits, and WAV finalization.
 - `POST /audio/stream` accepts chunked signed little-endian mono PCM16 at
   16,364 Hz and assembles `latest.wav` without buffering the capture in RAM.
 - Text requests larger than 4 KiB are rejected.
-- Responses include `Content-Length` and close the connection so the Stage 0
-  client can parse them simply and predictably.
+- Responses include `Content-Length` and keep HTTP/1.1 connections alive. The
+  Stage 0 client warms separate command and audio sockets at launch and reuses
+  them to avoid a fresh 3DS TCP handshake on every action.
+- TCP delayed-send coalescing is disabled on accepted development sockets to
+  minimize latency for the intentionally tiny request and response writes.

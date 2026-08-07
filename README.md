@@ -19,10 +19,10 @@ The first milestone is deliberately tiny:
 5. Receive a response.
 6. Display that response incrementally on the 3DS.
 
-The keyboard, networking, and incremental-output loop now work on hardware. A
-first microphone hardware run exposed a repeatable one-update capture stall; a
-cache-coherency fix with on-device diagnostics is ready for its focused retest.
-The real desktop bridge comes after Stage 0 is verified.
+The keyboard, networking, incremental-output loop, and sustained microphone
+capture now work on hardware. Hardware feedback then exposed roughly one to two
+seconds of avoidable setup latency because every action opened a new TCP
+connection. A warm-connection revision is ready for its focused retest.
 
 ## Stage 0 implementation status
 
@@ -42,10 +42,10 @@ The keyboard, LAN echo loop, incremental rendering, and scroll navigation have
 passed on physical 3DS hardware. The development server tests pass on the host,
 the 3DS application builds with devkitARM r68 and libctru 2.7.0, and the same
 build passes in CI using devkitPro's official toolchain container. Held-button
-scroll repeat also passed its focused hardware retest. The Stage 0E server path
-works, but the first client capture repeatedly stopped receiving new PCM after
-about 40 ms. Version `0.0.7-stage0` explicitly refreshes MIC shared-memory data
-and displays service/offset diagnostics for the next physical retest.
+scroll repeat also passed its focused hardware retest. Version `0.0.7-stage0`
+fixed the observed 40 ms microphone stall on hardware. Version `0.0.8-stage0`
+warms and reuses separate low-latency command and audio connections so user
+actions no longer pay a fresh TCP handshake.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical test checklist. See [`tools/dev-server/README.md`](tools/dev-server/README.md)

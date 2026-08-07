@@ -54,6 +54,12 @@ signed little-endian mono PCM16 at 16,364 Hz; the development server assembles a
 WAV incrementally and commits it only after a clean end marker. This proves
 bounded live upload behavior and is not a frozen production media protocol.
 
+After physical testing showed that fresh 3DS TCP setup added roughly one to two
+seconds to each action, the Stage 0 client was changed to warm and reuse two
+HTTP/1.1 connections: one for control/text requests and one for microphone
+streaming. This remains a disposable latency experiment, not a decision to use
+HTTP keep-alive as the production remote transport.
+
 Do not turn this disposable endpoint into the production protocol by accident.
 
 ## 4. Event model draft

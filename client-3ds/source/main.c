@@ -14,7 +14,7 @@
 #define SCROLL_REPEAT_DELAY_FRAMES 18
 #define SCROLL_REPEAT_INTERVAL_FRAMES 4
 #define MIC_STREAM_BUFFER_CAPACITY 8192
-#define MIC_STREAM_SEND_THRESHOLD 4096
+#define MIC_STREAM_SEND_THRESHOLD 1024
 
 static PrintConsole top_console;
 static PrintConsole bottom_console;
@@ -146,8 +146,9 @@ static void draw_bottom(void)
     printf("START: Exit\n\n");
     printf("Server: %s:%u\n", THREEGENT_SERVER_HOST, (unsigned int)THREEGENT_SERVER_PORT);
     printf(
-        "Network: %s\n",
-        network_ready ? "ready" : "unavailable"
+        "Network: %s | warm links: %u/2\n",
+        network_ready ? "ready" : "unavailable",
+        network_warm_connection_count()
     );
     printf(
         "Mic: %s (PCM16 mono, 16364 Hz)\n",
@@ -250,13 +251,14 @@ static SwkbdButton read_prompt(SwkbdResult *keyboard_result)
 
 static void run_request(const char *path, const char *success_state)
 {
+    u64 request_started_ms = osGetTime();
     response[0] = '\0';
     response_scroll_lines = 0;
     if (network_ready) {
         network_detail[0] = '\0';
     }
 
-    set_view_state("Connecting...");
+    set_view_state("Sending...");
     redraw();
     present_frame();
 
@@ -280,7 +282,12 @@ static void run_request(const char *path, const char *success_state)
                    show_response_progress,
                    NULL
                )) {
-        network_detail[0] = '\0';
+        snprintf(
+            network_detail,
+            sizeof(network_detail),
+            "Request completed in %u ms",
+            (unsigned int)(osGetTime() - request_started_ms)
+        );
         set_view_state(success_state);
     } else {
         if (response[0] == '\0') {
@@ -364,6 +371,7 @@ static bool drain_microphone_samples(void)
 
 static void begin_microphone_capture(void)
 {
+    u64 action_started_ms = osGetTime();
     response_scroll_lines = 0;
     if (network_ready) {
         network_detail[0] = '\0';
@@ -382,27 +390,10 @@ static void begin_microphone_capture(void)
         return;
     }
 
-    set_view_state("Opening audio stream...");
-    redraw();
-    present_frame();
-    if (!network_audio_stream_begin(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
-            "/audio/stream",
-            network_detail,
-            sizeof(network_detail)
-        )) {
-        snprintf(response, sizeof(response), "%s", network_detail);
-        set_view_state("Audio stream error");
-        redraw();
-        return;
-    }
-
     if (!microphone_begin_capture(
             microphone_detail,
             sizeof(microphone_detail)
         )) {
-        network_audio_stream_abort();
         snprintf(response, sizeof(response), "%s", microphone_detail);
         set_view_state("Microphone error");
         redraw();
@@ -416,6 +407,39 @@ static void begin_microphone_capture(void)
         "Streaming signed 16-bit mono PCM to the laptop while R is held. Release R to finalize latest.wav."
     );
     recording_session_active = true;
+    set_view_state("Starting audio stream...");
+    redraw();
+    present_frame();
+
+    u64 link_started_ms = osGetTime();
+    if (!network_audio_stream_begin(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_SERVER_PORT,
+            "/audio/stream",
+            network_detail,
+            sizeof(network_detail)
+        )) {
+        char stream_error[sizeof(network_detail)];
+        snprintf(stream_error, sizeof(stream_error), "%s", network_detail);
+        microphone_finish_capture(
+            microphone_detail,
+            sizeof(microphone_detail)
+        );
+        recording_session_active = false;
+        microphone_stream_size = 0;
+        snprintf(response, sizeof(response), "%s", stream_error);
+        set_view_state("Audio stream error");
+        redraw();
+        return;
+    }
+
+    snprintf(
+        network_detail,
+        sizeof(network_detail),
+        "Audio ready in %u ms (link %u ms)",
+        (unsigned int)(osGetTime() - action_started_ms),
+        (unsigned int)(osGetTime() - link_started_ms)
+    );
     set_view_state("Streaming audio...");
     redraw();
 }
@@ -555,6 +579,29 @@ int main(int argc, char **argv)
 
     network_ready = network_start(network_detail, sizeof(network_detail));
     microphone_initialize(microphone_detail, sizeof(microphone_detail));
+    if (network_ready) {
+        set_view_state("Warming low-latency links...");
+        redraw();
+        present_frame();
+
+        u64 warmup_started_ms = osGetTime();
+        if (network_prepare_connections(
+                THREEGENT_SERVER_HOST,
+                THREEGENT_SERVER_PORT,
+                network_detail,
+                sizeof(network_detail)
+            )) {
+            snprintf(
+                network_detail,
+                sizeof(network_detail),
+                "2 warm links ready in %u ms",
+                (unsigned int)(osGetTime() - warmup_started_ms)
+            );
+            set_view_state("Ready");
+        } else {
+            set_view_state("Server offline - retry action");
+        }
+    }
     redraw();
 
     while (aptMainLoop()) {

@@ -156,3 +156,22 @@ desktop.
 Stage 0 uses Candidate B over a disposable HTTP chunked endpoint. Keep the
 production decision Proposed until physical 3DS, hotspot, reconnect, and remote
 transport behavior are measured.
+
+### D-P09 — Persistent client transport
+
+**Status:** Proposed / Stage 0 experiment
+
+Candidate A: open a connection for each action.
+- simplest failure isolation;
+- physical testing measured user-visible setup latency of roughly one to two
+  seconds before small LAN requests or microphone streaming began.
+
+Candidate B: maintain persistent connections while the app is active.
+- removes repeated handshake latency and better matches interactive agent use;
+- requires framing, idle-connection detection, reconnection, and separate media
+  and control flow handling.
+
+Version `0.0.8-stage0` tests Candidate B using two warm HTTP/1.1 connections and
+`Content-Length` response framing. This is reversible and does not accept the
+production transport; WebSocket, a small persistent socket protocol, and remote
+encrypted transports remain open candidates.

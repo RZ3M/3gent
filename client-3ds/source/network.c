@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <malloc.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,7 +26,17 @@
 
 static u32 *soc_buffer = NULL;
 static bool soc_ready = false;
+static int control_socket = -1;
+static int prepared_audio_socket = -1;
 static int audio_stream_socket = -1;
+
+static void close_socket(int *socket_fd)
+{
+    if (*socket_fd >= 0) {
+        close(*socket_fd);
+        *socket_fd = -1;
+    }
+}
 
 static void set_error(char *error, size_t capacity, const char *message)
 {
@@ -91,6 +102,8 @@ bool network_start(char *error, size_t error_capacity)
 void network_stop(void)
 {
     network_audio_stream_abort();
+    close_socket(&prepared_audio_socket);
+    close_socket(&control_socket);
 
     if (soc_ready) {
         socExit();
@@ -117,6 +130,18 @@ static bool connect_with_timeout(
 
     if (fcntl(socket_fd, F_SETFL, original_flags | O_NONBLOCK) < 0) {
         set_errno_error(error, error_capacity, "fcntl", errno);
+        return false;
+    }
+
+    int no_delay = 1;
+    if (setsockopt(
+            socket_fd,
+            SOL_TCP,
+            TCP_NODELAY,
+            &no_delay,
+            sizeof(no_delay)
+        ) < 0) {
+        set_errno_error(error, error_capacity, "TCP_NODELAY", errno);
         return false;
     }
 
@@ -256,7 +281,8 @@ static bool read_http_response(
     char *error,
     size_t error_capacity,
     NetworkProgressCallback progress_callback,
-    void *progress_user_data
+    void *progress_user_data,
+    bool *connection_reusable
 )
 {
     char raw_response[HTTP_RESPONSE_CAPACITY + 1];
@@ -266,6 +292,11 @@ static bool read_http_response(
     size_t expected_body_size = 0;
     bool headers_parsed = false;
     bool has_content_length = false;
+    bool reusable = false;
+
+    if (connection_reusable != NULL) {
+        *connection_reusable = false;
+    }
 
     if (response == NULL || response_capacity == 0) {
         set_error(error, error_capacity, "response buffer is unavailable");
@@ -311,8 +342,16 @@ static bool read_http_response(
                 continue;
             }
 
+            unsigned int http_major = 0;
+            unsigned int http_minor = 0;
             unsigned int status_code = 0;
-            if (sscanf(raw_response, "HTTP/%*u.%*u %u", &status_code) != 1) {
+            if (sscanf(
+                    raw_response,
+                    "HTTP/%u.%u %u",
+                    &http_major,
+                    &http_minor,
+                    &status_code
+                ) != 3) {
                 set_error(error, error_capacity, "invalid HTTP response");
                 return false;
             }
@@ -326,6 +365,17 @@ static bool read_http_response(
                     );
                 }
                 return false;
+            }
+
+            reusable = http_major > 1
+                || (http_major == 1 && http_minor >= 1);
+            if (strstr(raw_response, "\r\nConnection: close") != NULL) {
+                reusable = false;
+            } else if (strstr(
+                    raw_response,
+                    "\r\nConnection: keep-alive"
+                ) != NULL) {
+                reusable = true;
             }
 
             char *content_length = strstr(raw_response, "\r\nContent-Length:");
@@ -380,6 +430,11 @@ static bool read_http_response(
                     progress_callback(response, progress_user_data);
                 }
             }
+
+            if (has_content_length
+                && delivered_body_size == expected_body_size) {
+                break;
+            }
         }
     }
 
@@ -405,7 +460,190 @@ static bool read_http_response(
         return false;
     }
 
+    if (connection_reusable != NULL) {
+        *connection_reusable = reusable && has_content_length;
+    }
+
     return true;
+}
+
+static int open_server_socket(
+    const char *host,
+    unsigned short port,
+    char *error,
+    size_t error_capacity
+)
+{
+    struct sockaddr_in server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+
+    if (inet_pton(AF_INET, host, &server_address.sin_addr) != 1) {
+        set_error(
+            error,
+            error_capacity,
+            "server host must be a numeric IPv4 address"
+        );
+        return -1;
+    }
+
+    int socket_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (socket_fd < 0) {
+        set_errno_error(error, error_capacity, "socket", errno);
+        return -1;
+    }
+
+    if (!connect_with_timeout(
+            socket_fd,
+            (const struct sockaddr *)&server_address,
+            sizeof(server_address),
+            error,
+            error_capacity
+        )) {
+        close(socket_fd);
+        return -1;
+    }
+
+    return socket_fd;
+}
+
+static bool verify_persistent_connection(
+    int socket_fd,
+    const char *host,
+    unsigned short port,
+    char *error,
+    size_t error_capacity
+)
+{
+    char request[256];
+    int request_size = snprintf(
+        request,
+        sizeof(request),
+        "GET /health HTTP/1.1\r\n"
+        "Host: %s:%u\r\n"
+        "User-Agent: 3gent/%s\r\n"
+        "Connection: keep-alive\r\n"
+        "\r\n",
+        host,
+        (unsigned int)port,
+        THREEGENT_APP_VERSION
+    );
+    if (request_size < 0 || (size_t)request_size >= sizeof(request)) {
+        set_error(error, error_capacity, "health request is too large");
+        return false;
+    }
+    if (!send_all(
+            socket_fd,
+            request,
+            (size_t)request_size,
+            error,
+            error_capacity
+        )) {
+        return false;
+    }
+
+    char response[80];
+    bool reusable = false;
+    if (!read_http_response(
+            socket_fd,
+            response,
+            sizeof(response),
+            error,
+            error_capacity,
+            NULL,
+            NULL,
+            &reusable
+        )) {
+        return false;
+    }
+    if (!reusable) {
+        set_error(
+            error,
+            error_capacity,
+            "server closed warm connection; restart updated server"
+        );
+        return false;
+    }
+    return true;
+}
+
+bool network_prepare_connections(
+    const char *host,
+    unsigned short port,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (!soc_ready) {
+        set_error(error, error_capacity, "network service is not initialized");
+        return false;
+    }
+    if (host == NULL) {
+        set_error(error, error_capacity, "invalid server host");
+        return false;
+    }
+    if (audio_stream_socket >= 0) {
+        set_error(error, error_capacity, "audio stream is active");
+        return false;
+    }
+
+    close_socket(&control_socket);
+    close_socket(&prepared_audio_socket);
+
+    int new_control_socket = open_server_socket(
+        host,
+        port,
+        error,
+        error_capacity
+    );
+    if (new_control_socket < 0) {
+        return false;
+    }
+
+    int new_audio_socket = open_server_socket(
+        host,
+        port,
+        error,
+        error_capacity
+    );
+    if (new_audio_socket < 0) {
+        close(new_control_socket);
+        return false;
+    }
+
+    bool control_ready = verify_persistent_connection(
+        new_control_socket,
+        host,
+        port,
+        error,
+        error_capacity
+    );
+    bool audio_ready = control_ready && verify_persistent_connection(
+        new_audio_socket,
+        host,
+        port,
+        error,
+        error_capacity
+    );
+    if (!control_ready || !audio_ready) {
+        close(new_audio_socket);
+        close(new_control_socket);
+        return false;
+    }
+
+    control_socket = new_control_socket;
+    prepared_audio_socket = new_audio_socket;
+    return true;
+}
+
+unsigned int network_warm_connection_count(void)
+{
+    unsigned int count = control_socket >= 0 ? 1U : 0U;
+    if (prepared_audio_socket >= 0 || audio_stream_socket >= 0) {
+        count++;
+    }
+    return count;
 }
 
 bool network_post_bytes(
@@ -433,35 +671,23 @@ bool network_post_bytes(
         return false;
     }
 
-    struct sockaddr_in server_address;
-    memset(&server_address, 0, sizeof(server_address));
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(port);
-
-    if (inet_pton(AF_INET, host, &server_address.sin_addr) != 1) {
-        set_error(error, error_capacity, "server host must be a numeric IPv4 address");
-        return false;
+    if (control_socket < 0) {
+        control_socket = open_server_socket(
+            host,
+            port,
+            error,
+            error_capacity
+        );
+        if (control_socket < 0) {
+            return false;
+        }
     }
 
-    int socket_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
-    if (socket_fd < 0) {
-        set_errno_error(error, error_capacity, "socket", errno);
-        return false;
-    }
-
+    int socket_fd = control_socket;
     bool success = false;
+    bool reusable = false;
 
     do {
-        if (!connect_with_timeout(
-                socket_fd,
-                (const struct sockaddr *)&server_address,
-                sizeof(server_address),
-                error,
-                error_capacity
-            )) {
-            break;
-        }
-
         char request_header[HTTP_REQUEST_HEADER_CAPACITY];
         int request_size = snprintf(
             request_header,
@@ -471,7 +697,7 @@ bool network_post_bytes(
             "User-Agent: 3gent/%s\r\n"
             "Content-Type: %s\r\n"
             "Content-Length: %u\r\n"
-            "Connection: close\r\n"
+            "Connection: keep-alive\r\n"
             "\r\n",
             path,
             host,
@@ -518,7 +744,8 @@ bool network_post_bytes(
                 error,
                 error_capacity,
                 progress_callback,
-                progress_user_data
+                progress_user_data,
+                &reusable
             )) {
             break;
         }
@@ -526,7 +753,9 @@ bool network_post_bytes(
         success = true;
     } while (false);
 
-    close(socket_fd);
+    if (!success || !reusable) {
+        close_socket(&control_socket);
+    }
     return success;
 }
 
@@ -585,30 +814,18 @@ bool network_audio_stream_begin(
         return false;
     }
 
-    struct sockaddr_in server_address;
-    memset(&server_address, 0, sizeof(server_address));
-    server_address.sin_family = AF_INET;
-    server_address.sin_port = htons(port);
-    if (inet_pton(AF_INET, host, &server_address.sin_addr) != 1) {
-        set_error(error, error_capacity, "server host must be a numeric IPv4 address");
-        return false;
-    }
-
-    int socket_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    int socket_fd = prepared_audio_socket;
+    prepared_audio_socket = -1;
     if (socket_fd < 0) {
-        set_errno_error(error, error_capacity, "socket", errno);
-        return false;
-    }
-
-    if (!connect_with_timeout(
-            socket_fd,
-            (const struct sockaddr *)&server_address,
-            sizeof(server_address),
+        socket_fd = open_server_socket(
+            host,
+            port,
             error,
             error_capacity
-        )) {
-        close(socket_fd);
-        return false;
+        );
+        if (socket_fd < 0) {
+            return false;
+        }
     }
 
     char request_header[HTTP_REQUEST_HEADER_CAPACITY];
@@ -621,7 +838,7 @@ bool network_audio_stream_begin(
         "Content-Type: application/x-3gent-pcm; "
             "format=s16le; rate=16364; channels=1\r\n"
         "Transfer-Encoding: chunked\r\n"
-        "Connection: close\r\n"
+        "Connection: keep-alive\r\n"
         "\r\n",
         path,
         host,
@@ -726,6 +943,7 @@ bool network_audio_stream_finish(
         error_capacity
     );
     if (success) {
+        bool reusable = false;
         success = read_http_response(
             socket_fd,
             response,
@@ -733,11 +951,18 @@ bool network_audio_stream_finish(
             error,
             error_capacity,
             NULL,
-            NULL
+            NULL,
+            &reusable
         );
+        if (success && reusable) {
+            prepared_audio_socket = socket_fd;
+            socket_fd = -1;
+        }
     }
 
-    close(socket_fd);
+    if (socket_fd >= 0) {
+        close(socket_fd);
+    }
     audio_stream_socket = -1;
     return success;
 }

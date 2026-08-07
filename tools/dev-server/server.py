@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import socket
 import sys
 import threading
 import time
@@ -29,41 +30,61 @@ class AudioStreamTooLarge(Exception):
 
 
 class EchoHandler(BaseHTTPRequestHandler):
-    server_version = "3gent-stage0/0.0.7"
+    protocol_version = "HTTP/1.1"
+    server_version = "3gent-stage0/0.0.8"
     stream_delay_seconds = 0.08
 
-    def _send_text(self, status: HTTPStatus, text: str) -> None:
+    def _send_text(
+        self,
+        status: HTTPStatus,
+        text: str,
+        *,
+        keep_alive: bool = True,
+    ) -> None:
         body = text.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
+        self.send_header("Connection", "keep-alive" if keep_alive else "close")
         self.end_headers()
         self.wfile.write(body)
-        self.close_connection = True
+        self.close_connection = not keep_alive
 
     def _read_body(self, maximum_size: int) -> bytes | None:
         raw_length = self.headers.get("Content-Length")
         if raw_length is None:
-            self._send_text(HTTPStatus.LENGTH_REQUIRED, "Content-Length required")
+            self._send_text(
+                HTTPStatus.LENGTH_REQUIRED,
+                "Content-Length required",
+                keep_alive=False,
+            )
             return None
 
         try:
             content_length = int(raw_length)
         except ValueError:
-            self._send_text(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            self._send_text(
+                HTTPStatus.BAD_REQUEST,
+                "invalid Content-Length",
+                keep_alive=False,
+            )
             return None
 
         if content_length < 0 or content_length > maximum_size:
             self._send_text(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 f"request must be at most {maximum_size} bytes",
+                keep_alive=False,
             )
             return None
 
         body = self.rfile.read(content_length)
         if len(body) != content_length:
-            self._send_text(HTTPStatus.BAD_REQUEST, "incomplete request body")
+            self._send_text(
+                HTTPStatus.BAD_REQUEST,
+                "incomplete request body",
+                keep_alive=False,
+            )
             return None
 
         return body
@@ -119,6 +140,7 @@ class EchoHandler(BaseHTTPRequestHandler):
             self._send_text(
                 HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                 "expected application/x-3gent-pcm s16le/16364Hz/mono",
+                keep_alive=False,
             )
             return
 
@@ -130,11 +152,16 @@ class EchoHandler(BaseHTTPRequestHandler):
             self._send_text(
                 HTTPStatus.BAD_REQUEST,
                 "chunked Transfer-Encoding required",
+                keep_alive=False,
             )
             return
 
         if not self.server.audio_stream_lock.acquire(blocking=False):
-            self._send_text(HTTPStatus.CONFLICT, "another audio stream is active")
+            self._send_text(
+                HTTPStatus.CONFLICT,
+                "another audio stream is active",
+                keep_alive=False,
+            )
             return
 
         capture_directory = self.server.capture_directory
@@ -173,15 +200,24 @@ class EchoHandler(BaseHTTPRequestHandler):
             self._send_text(
                 HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
                 f"audio stream exceeds {self.server.max_audio_seconds} seconds",
+                keep_alive=False,
             )
             return
         except ChunkedBodyError as error:
             temporary_path.unlink(missing_ok=True)
-            self._send_text(HTTPStatus.BAD_REQUEST, str(error))
+            self._send_text(
+                HTTPStatus.BAD_REQUEST,
+                str(error),
+                keep_alive=False,
+            )
             return
         except OSError as error:
             temporary_path.unlink(missing_ok=True)
-            self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"audio save failed: {error}")
+            self._send_text(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                f"audio save failed: {error}",
+                keep_alive=False,
+            )
             return
         finally:
             self.server.audio_stream_lock.release()
@@ -217,14 +253,14 @@ class EchoHandler(BaseHTTPRequestHandler):
             "Content-Length",
             str(sum(len(chunk) for chunk in encoded_chunks)),
         )
-        self.send_header("Connection", "close")
+        self.send_header("Connection", "keep-alive")
         self.end_headers()
 
         for chunk in encoded_chunks:
             self.wfile.write(chunk)
             self.wfile.flush()
             time.sleep(self.stream_delay_seconds)
-        self.close_connection = True
+        self.close_connection = False
 
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         if self.path != "/health":
@@ -239,7 +275,11 @@ class EchoHandler(BaseHTTPRequestHandler):
             return
 
         if self.path not in {"/echo", "/stream"}:
-            self._send_text(HTTPStatus.NOT_FOUND, "not found")
+            self._send_text(
+                HTTPStatus.NOT_FOUND,
+                "not found",
+                keep_alive=False,
+            )
             return
 
         message = self._read_message()
@@ -276,6 +316,11 @@ class DevelopmentServer(ThreadingHTTPServer):
         self.max_audio_pcm_bytes = max_audio_seconds * AUDIO_BYTES_PER_SECOND
         self.audio_stream_lock = threading.Lock()
         super().__init__(server_address, handler)
+
+    def get_request(self) -> tuple[socket.socket, tuple[str, int]]:
+        request, client_address = super().get_request()
+        request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return request, client_address
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
         error = sys.exc_info()[1]

@@ -97,6 +97,32 @@ class EchoServerTests(unittest.TestCase):
             "hello from 3gent dev server: hello 3DS ✓".encode(),
         )
 
+    def test_reuses_connection_for_multiple_echoes(self) -> None:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1",
+            self.port,
+            timeout=2,
+        )
+        try:
+            connection.request("POST", "/echo", body=b"first")
+            first_response = connection.getresponse()
+            self.assertEqual(first_response.status, 200)
+            first_response.read()
+            self.assertIsNotNone(connection.sock)
+            first_client_port = connection.sock.getsockname()[1]
+
+            connection.request("POST", "/echo", body=b"second")
+            second_response = connection.getresponse()
+            self.assertEqual(second_response.status, 200)
+            second_response.read()
+            self.assertIsNotNone(connection.sock)
+            self.assertEqual(
+                connection.sock.getsockname()[1],
+                first_client_port,
+            )
+        finally:
+            connection.close()
+
     def test_rejects_unknown_path(self) -> None:
         status, _ = self.request("POST", "/missing", b"hello")
         self.assertEqual(status, 404)
@@ -122,6 +148,40 @@ class EchoServerTests(unittest.TestCase):
             self.assertEqual(saved.getsampwidth(), 2)
             self.assertEqual(saved.getframerate(), 16364)
             self.assertEqual(saved.readframes(saved.getnframes()), pcm_data)
+
+    def test_reuses_connection_for_multiple_audio_streams(self) -> None:
+        connection = self.open_audio_stream()
+        try:
+            first_pcm = b"\x01\x00\x02\x00"
+            connection.send(f"{len(first_pcm):x}\r\n".encode())
+            connection.send(first_pcm + b"\r\n0\r\n\r\n")
+            first_response = connection.getresponse()
+            self.assertEqual(first_response.status, 200)
+            first_response.read()
+            self.assertIsNotNone(connection.sock)
+            first_client_port = connection.sock.getsockname()[1]
+
+            connection.putrequest("POST", "/audio/stream")
+            connection.putheader(
+                "Content-Type",
+                "application/x-3gent-pcm; "
+                "format=s16le; rate=16364; channels=1",
+            )
+            connection.putheader("Transfer-Encoding", "chunked")
+            connection.endheaders()
+            second_pcm = b"\x03\x00\x04\x00"
+            connection.send(f"{len(second_pcm):x}\r\n".encode())
+            connection.send(second_pcm + b"\r\n0\r\n\r\n")
+            second_response = connection.getresponse()
+            self.assertEqual(second_response.status, 200)
+            second_response.read()
+            self.assertIsNotNone(connection.sock)
+            self.assertEqual(
+                connection.sock.getsockname()[1],
+                first_client_port,
+            )
+        finally:
+            connection.close()
 
     def test_writes_temporary_wav_before_stream_finishes(self) -> None:
         connection = self.open_audio_stream()

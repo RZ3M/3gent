@@ -96,7 +96,7 @@
 
 **Question:** What is the simplest reliable way to send a small request from 3DS homebrew to a LAN server?
 
-**Status:** CORE LAN ROUND TRIP HARDWARE PASS / FAILURE PATH TODO
+**Status:** CORE LAN ROUND TRIP HARDWARE PASS / LATENCY RETEST TODO
 
 Test:
 - DNS if needed;
@@ -152,6 +152,33 @@ Do not use this experiment as the production remote security design.
   rendering are proven on hardware. Explicit server-offline timeout and retry
   behavior remain to be checked in Stage 0D.
 
+**2026-08-07 latency feedback and warm-connection revision:**
+
+- Hardware feedback measured about one second between submitting an `A` message
+  and seeing it arrive at the laptop, and more than two seconds before the app
+  showed microphone streaming after holding `R`.
+- Inspection found that every text action and microphone session created a new
+  non-blocking TCP socket and explicitly requested `Connection: close`. The
+  microphone did not start until that setup returned, directly exposing the
+  connection delay as input latency.
+- Version `0.0.8-stage0` warms two verified HTTP/1.1 connections during app
+  startup, dedicates one to control requests and one to audio, and reuses each
+  after a `Content-Length`-framed response. Both ends enable `TCP_NODELAY` for
+  the small Stage 0 writes.
+- The audio send threshold drops from 4 KiB (roughly 125 ms of PCM) to 1 KiB,
+  allowing each observed roughly 40 ms MIC service update to be transmitted
+  immediately instead of waiting for three or four updates to accumulate.
+- Microphone sampling now starts and becomes visible before the network stream
+  setup fallback. The MIC ring can therefore absorb samples during a reconnect
+  instead of shifting the beginning of the user's recording.
+- The app displays startup warmup, request round-trip, total audio-start, and
+  audio-link setup times. The focused trusted-LAN target is under 250 ms for a
+  warm echo and total audio start; actual hardware values and idle/reconnect
+  behavior remain to be tested.
+- Host result: the development server reuses a single connection for repeated
+  echo and audio requests in automated tests. The 3DS client builds with the
+  configured toolchain; hardware confirmation remains required.
+
 ---
 
 ## R-004 — Incremental text display
@@ -206,7 +233,7 @@ Measure:
 
 **Question:** Can we reliably record push-to-talk audio into bounded memory/storage?
 
-**Status:** HARDWARE FAILURE OBSERVED / DIAGNOSTIC FIX READY FOR RETEST
+**Status:** SUSTAINED CAPTURE HARDWARE PASS / QUALITY AND FAILURE PATHS TODO
 
 Determine:
 - actual libctru microphone API to use;
@@ -304,6 +331,18 @@ Start with raw/simple capture. Compression is a later optimization.
 - Host result: the diagnostic client builds cleanly with the configured
   devkitPro toolchain; all twelve development-server tests still pass. A focused
   physical retest is required before R-005 can be marked proven.
+
+**2026-08-07 successful capture retest:**
+
+- The user confirmed that version `0.0.7-stage0` continued capturing beyond the
+  previous single 40 ms update and that streaming worked.
+- The same test exposed a separate startup-latency issue: `R` had to remain held
+  for more than two seconds before the UI entered its streaming state. This was
+  caused by fresh TCP setup preceding MIC startup, not by the repaired sample
+  capture loop, and is addressed separately by the `0.0.8-stage0` experiment.
+- Sustained MIC sample capture is now a hardware pass. Intelligibility/gain,
+  five-minute behavior, interruption, shell close/resume, network loss, and
+  exact hardware model still require explicit results.
 
 ---
 

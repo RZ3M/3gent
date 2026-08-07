@@ -11,17 +11,20 @@ This client tests the five Stage 0 3DS boundaries:
 
 This is a development spike, not the production bridge or protocol. The basic
 keyboard, LAN echo path, incremental rendering, and held scroll navigation have
-passed on physical hardware. The first microphone hardware check exposed a
-repeatable client-side capture stall after one roughly 40 ms MIC update; version
-`0.0.7-stage0` contains a cache-coherency fix and focused on-screen diagnostics.
+passed on physical hardware. The cache-coherency fix in `0.0.7-stage0` also
+resolved the repeatable 40 ms microphone stall on hardware. The next focused
+test is `0.0.8-stage0`'s warm command/audio connections and low-latency socket
+settings, added after hardware showed one-to-two-second fresh-connection delays.
 
 The microphone spike uses the current libctru MIC service with signed 16-bit
 mono PCM at the `MICU_SAMPLE_RATE_16360` setting (approximately 16,364.479 Hz).
 The generated WAV declares the rounded integer rate of 16,364 Hz. The client
-opens one HTTP/1.1 chunked stream while `R` is held, sends PCM in approximately
-4 KiB pieces, and retains only an 8 KiB outgoing buffer. A five-minute safety
-ceiling bounds each development capture without making memory usage grow with
-duration.
+opens one HTTP/1.1 chunked stream while `R` is held, sends each roughly 40 ms MIC
+update without waiting for a larger batch, and retains only an 8 KiB outgoing
+buffer. A five-minute safety ceiling bounds each development capture without
+making memory usage grow with duration. Stage 0 keeps separate HTTP/1.1
+connections warm for commands and audio, allowing either path to begin without
+opening a new TCP connection.
 
 ## Prerequisites
 
@@ -94,29 +97,35 @@ open tools/dev-server/captures/latest.wav
 Record the hardware model, host OS, devkitPro package versions, and network setup
 with the result.
 
-1. Start the development server and confirm that `/health` responds.
+1. Stop any older development-server process, start the server from the current
+   source, and confirm that `/health` responds. Version `0.0.8-stage0` requires
+   the server's HTTP/1.1 persistent-connection support.
 2. Launch 3gent from the Homebrew Launcher.
 3. Confirm that both screens clear and render without corruption.
 4. Confirm that the top screen shows `3gent`, `Stage 0A-E`, and version
-   `0.0.7-stage0`.
-5. Confirm that the bottom screen shows the configured IP address and reports the
-   network service as ready.
+   `0.0.8-stage0`.
+5. Wait for startup warmup to finish. Confirm that the bottom screen reports
+   `warm links: 2/2` and record the displayed warmup time.
 6. Press `A`; confirm that the native software keyboard opens.
 7. Choose Cancel; confirm that the app returns safely and reports cancellation.
 8. Press `A` again, type `hello`, and choose Send.
-9. Confirm that `Connecting...` is visibly shown.
-10. Confirm that the server logs the request from the 3DS.
-11. Confirm that the top screen shows `Echo complete`, the entered text, and
+9. Confirm that the server logs the request nearly immediately after Send and
+   record the on-screen `Request completed in ... ms` measurement. The focused
+   trusted-LAN target is below 250 ms; record the actual value if it is higher.
+10. Confirm that the top screen shows `Echo complete`, the entered text, and
     `hello from 3gent dev server: hello`.
 12. Press `X`; confirm that text appears in multiple visible updates over roughly
     two seconds and finishes with `Stream complete`.
 13. Press and hold D-pad or Circle Pad Up and Down; confirm that scrolling moves
     once immediately, repeats after a short delay, stops on release, and that the
     bottom screen reports the scroll position.
-14. Hold `R`, speak for at least fifteen seconds. Confirm that `Held` tracks the
-    actual hold time, `PCM` keeps increasing at roughly the same rate, `pos` and
-    `changes` keep advancing, `MICU` remains `sampling`, and `no new data`
-    repeatedly returns near zero instead of growing continuously.
+14. Press and hold `R`. Confirm that `Streaming audio...` appears without the
+    previous one-to-two-second pause and record both values in
+    `Audio ready in ... ms (link ... ms)`.
+    Continue speaking for at least fifteen seconds and confirm that `Held`
+    tracks the actual hold time, `PCM` keeps increasing at roughly the same
+    rate, `pos` and `changes` keep advancing, `MICU` remains `sampling`, and
+    `no new data` repeatedly returns near zero instead of growing continuously.
 15. While still holding `R`, confirm that
     `tools/dev-server/captures/latest.wav.tmp` exists and grows on the laptop.
     This distinguishes live streaming from a release-time upload.
@@ -127,8 +136,9 @@ with the result.
     microphone audio.
 18. Stop the server and send text again; confirm that an error or timeout appears
     within roughly five seconds.
-19. With the server stopped, hold `R`; confirm stream setup fails visibly within
-    roughly five seconds and microphone capture does not begin.
+19. With the server stopped, hold `R`; confirm local microphone capture begins
+    immediately, then stops with a visible stream error within roughly five
+    seconds without producing a completed server capture.
 20. Restart the server, begin another recording, then stop the server while `R`
     remains held. Confirm the app exits recording with a visible stream error and
     does not replace the last completed `latest.wav` with a partial capture.
@@ -151,6 +161,9 @@ steps have been performed on hardware.
   port and verify no firewall is rejecting it.
 - `server returned HTTP 404`: restart the supplied Stage 0 server so both
   the text and microphone endpoints are available.
+- `server closed warm connection; restart updated server`: stop the existing
+  Python process and launch the server from the same current checkout as the
+  `0.0.8-stage0` client.
 - `response exceeded the bounded buffer`: the client intentionally refuses an
   HTTP response larger than its fixed development buffer.
 - `Mic: unavailable`: record the hexadecimal on-screen MIC service error,
