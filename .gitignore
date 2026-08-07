@@ -1,0 +1,13 @@
+.DS_Store
+
+# Nintendo 3DS build output
+client-3ds/build/
+client-3ds/*.3dsx
+client-3ds/*.elf
+client-3ds/*.map
+client-3ds/*.smdh
+
+# Python development server
+__pycache__/
+*.py[cod]
+.venv/

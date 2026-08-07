@@ -1,0 +1,145 @@
+# 3gent — Security Model
+
+**Status:** Draft / security-sensitive design must be reviewed before remote release
+
+## 1. Threat model summary
+
+3gent remotely controls software that may:
+- read source code;
+- edit files;
+- execute commands;
+- access network resources depending on the agent's policy.
+
+Therefore a compromised remote client must not automatically become unrestricted shell access.
+
+## 2. Trust boundaries
+
+### Trusted authority
+
+The desktop bridge.
+
+It owns:
+- local agent integration;
+- policy;
+- secrets;
+- approval validation;
+- repository access.
+
+### Less-trusted client
+
+The 3DS.
+
+It can request actions but cannot override bridge policy.
+
+### Minimally trusted relay
+
+If used, the relay should route traffic with the smallest practical amount of retained data and privilege.
+
+## 3. Secrets
+
+Never store these on the 3DS:
+- OpenAI API keys;
+- Claude/Anthropic keys;
+- long-lived provider credentials;
+- SSH private keys unless a future separately reviewed design explicitly requires it.
+
+Prefer device-specific, revocable 3gent credentials.
+
+## 4. Pairing
+
+QR is the default bootstrap.
+
+The QR must contain only short-lived pairing material, for example:
+- protocol version;
+- endpoint;
+- random nonce/challenge identifier;
+- public-key fingerprint or equivalent identity binding;
+- display name.
+
+Do not put a permanent bearer token directly in the QR.
+
+Requirements:
+- expiration;
+- one-time or replay-resistant use;
+- visible device name;
+- revocation from desktop;
+- manual fallback.
+
+## 5. Remote approvals
+
+Each approval response must be bound to:
+- approval ID;
+- session;
+- current bridge state;
+- expiration;
+- allowed choice set.
+
+Never accept:
+```text
+"approve whatever is pending"
+```
+
+as the production semantic.
+
+## 6. Approval tiers
+
+Proposed model:
+
+### Tier 0 — read-only/status
+May be automatic.
+
+### Tier 1 — bounded ordinary action
+May be remotely approvable once.
+
+### Tier 2 — broad/high-impact action
+May require stronger confirmation.
+
+### Tier 3 — prohibited remotely
+Must be confirmed at the development computer or forbidden.
+
+Exact classification is pending.
+
+## 7. Transport security
+
+Remote communication must use a standard, reviewed encryption approach.
+
+Important:
+- the 3DS is old hardware;
+- TLS/library compatibility must be tested;
+- if modern TLS is difficult, do not solve that by writing a home-made cipher;
+- prefer an existing, maintained crypto/TLS implementation or a different architecture.
+
+## 8. Relay
+
+Relay should not need:
+- AI provider keys;
+- repository filesystem access;
+- shell access.
+
+Consider end-to-end/application-layer protection only if it can be implemented with reviewed primitives and libraries.
+
+## 9. Local development
+
+It is acceptable for the Stage 0 LAN echo spike to use plain local HTTP **only as a clearly marked development experiment**.
+
+It must not be presented as the remote production security model.
+
+## 10. Logging
+
+Logs must avoid:
+- provider credentials;
+- pairing secrets;
+- full sensitive prompts by default;
+- arbitrary repository file contents unless explicitly enabled for debugging.
+
+## 11. Security TODO before public remote beta
+
+- document device credential format;
+- document revocation;
+- document relay authentication;
+- define approval tiers;
+- threat-model replay and impersonation;
+- test sleep/reconnect;
+- test lost/stolen 3DS handling;
+- review dependencies;
+- add responsible disclosure instructions.
