@@ -48,6 +48,12 @@ The point is to prove:
 - timeouts;
 - text rendering.
 
+The Stage 0E microphone experiment additionally uses one disposable
+`POST /audio/stream` request with HTTP/1.1 chunked transfer encoding. Its body is
+signed little-endian mono PCM16 at 16,364 Hz; the development server assembles a
+WAV incrementally and commits it only after a clean end marker. This proves
+bounded live upload behavior and is not a frozen production media protocol.
+
 Do not turn this disposable endpoint into the production protocol by accident.
 
 ## 4. Event model draft

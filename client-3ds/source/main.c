@@ -13,6 +13,8 @@
 #define RESPONSE_VISIBLE_LINES 22
 #define SCROLL_REPEAT_DELAY_FRAMES 18
 #define SCROLL_REPEAT_INTERVAL_FRAMES 4
+#define MIC_STREAM_BUFFER_CAPACITY 8192
+#define MIC_STREAM_SEND_THRESHOLD 4096
 
 static PrintConsole top_console;
 static PrintConsole bottom_console;
@@ -23,8 +25,10 @@ static char network_detail[160];
 static char microphone_detail[160];
 static char view_state[32] = "Ready";
 static char wrapped_lines[RESPONSE_MAX_LINES][RESPONSE_WRAP_COLUMNS + 1];
+static u8 microphone_stream_buffer[MIC_STREAM_BUFFER_CAPACITY];
 static bool network_ready;
 static bool recording_session_active;
+static size_t microphone_stream_size;
 static size_t response_scroll_lines;
 static int scroll_repeat_direction;
 static u32 scroll_repeat_frames;
@@ -137,8 +141,7 @@ static void draw_bottom(void)
 
     printf("A: Type + echo\n");
     printf("X: Incremental demo\n");
-    printf("R: Hold to record (10 sec max)\n");
-    printf("Y: Upload last recording\n");
+    printf("R: Hold to stream mic (5 min max)\n");
     printf("UP/DOWN: Scroll response\n");
     printf("START: Exit\n\n");
     printf("Server: %s:%u\n", THREEGENT_SERVER_HOST, (unsigned int)THREEGENT_SERVER_PORT);
@@ -160,24 +163,18 @@ static void draw_bottom(void)
         }
 
         printf(
-            "Recording: %u.%02u / %u.00 sec\n",
-            duration_ms / 1000,
+            "Streaming: %u:%02u.%02u / %u:%02u\n",
+            duration_ms / 60000,
+            (duration_ms / 1000) % 60,
             (duration_ms % 1000) / 10,
-            THREEGENT_MIC_MAX_SECONDS
+            THREEGENT_MIC_MAX_SECONDS / 60,
+            THREEGENT_MIC_MAX_SECONDS % 60
         );
         printf("Level: [");
         for (unsigned int mark = 0; mark < 10; mark++) {
             printf("%c", mark < level_marks ? '#' : '.');
         }
         printf("] %u%%\n", level);
-    } else if (microphone_has_capture()) {
-        unsigned int duration_ms = microphone_duration_ms();
-        printf(
-            "Last audio: %u.%02u sec, %u bytes\n",
-            duration_ms / 1000,
-            (duration_ms % 1000) / 10,
-            (unsigned int)microphone_wav_size()
-        );
     }
 
     if (response_scroll_lines == 0) {
@@ -283,24 +280,83 @@ static void run_request(const char *path, const char *success_state)
     redraw();
 }
 
-static void upload_microphone_capture(void)
+static void stop_failed_microphone_stream(const char *error_message)
 {
-    response[0] = '\0';
+    char stop_error[80];
+    if (microphone_is_sampling()) {
+        microphone_finish_capture(stop_error, sizeof(stop_error));
+    }
+    network_audio_stream_abort();
+    microphone_stream_size = 0;
+    recording_session_active = false;
+
+    if (error_message != NULL && error_message[0] != '\0') {
+        snprintf(response, sizeof(response), "%s", error_message);
+    } else {
+        snprintf(response, sizeof(response), "Microphone stream failed.");
+    }
+    set_view_state("Audio stream error");
+    redraw();
+}
+
+static bool send_microphone_stream_buffer(bool force)
+{
+    if (microphone_stream_size == 0) {
+        return true;
+    }
+    if (!force && microphone_stream_size < MIC_STREAM_SEND_THRESHOLD) {
+        return true;
+    }
+
+    if (!network_audio_stream_write(
+            microphone_stream_buffer,
+            microphone_stream_size,
+            network_detail,
+            sizeof(network_detail)
+        )) {
+        return false;
+    }
+
+    microphone_stream_size = 0;
+    return true;
+}
+
+static bool drain_microphone_samples(void)
+{
+    while (true) {
+        if (microphone_stream_size == sizeof(microphone_stream_buffer)
+            && !send_microphone_stream_buffer(true)) {
+            return false;
+        }
+
+        size_t bytes_read = 0;
+        if (!microphone_read_capture(
+                microphone_stream_buffer + microphone_stream_size,
+                sizeof(microphone_stream_buffer) - microphone_stream_size,
+                &bytes_read,
+                microphone_detail,
+                sizeof(microphone_detail)
+            )) {
+            return false;
+        }
+        microphone_stream_size += bytes_read;
+
+        if (!send_microphone_stream_buffer(false)) {
+            return false;
+        }
+        if (bytes_read == 0) {
+            return true;
+        }
+    }
+}
+
+static void begin_microphone_capture(void)
+{
     response_scroll_lines = 0;
     if (network_ready) {
         network_detail[0] = '\0';
     }
-
-    if (!microphone_has_capture()) {
-        snprintf(response, sizeof(response), "No completed recording to upload.");
-        set_view_state("No audio captured");
-        redraw();
-        return;
-    }
-
-    set_view_state("Uploading audio...");
-    redraw();
-    present_frame();
+    microphone_detail[0] = '\0';
 
     if (!network_ready) {
         snprintf(
@@ -309,105 +365,118 @@ static void upload_microphone_capture(void)
             "Network initialization failed: %s",
             network_detail
         );
-        set_view_state("Upload error - retry Y");
-    } else if (network_post_bytes(
-                   THREEGENT_SERVER_HOST,
-                   THREEGENT_SERVER_PORT,
-                   "/audio",
-                   "audio/wav",
-                   microphone_wav_data(),
-                   microphone_wav_size(),
-                   response,
-                   sizeof(response),
-                   network_detail,
-                   sizeof(network_detail),
-                   NULL,
-                   NULL
-               )) {
-        network_detail[0] = '\0';
-        set_view_state("Audio upload complete");
-    } else {
-        if (response[0] == '\0') {
-            snprintf(response, sizeof(response), "%s", network_detail);
-        }
-        set_view_state("Upload error - retry Y");
+        set_view_state("Audio stream error");
+        redraw();
+        return;
     }
 
+    set_view_state("Opening audio stream...");
     redraw();
-}
+    present_frame();
+    if (!network_audio_stream_begin(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_SERVER_PORT,
+            "/audio/stream",
+            network_detail,
+            sizeof(network_detail)
+        )) {
+        snprintf(response, sizeof(response), "%s", network_detail);
+        set_view_state("Audio stream error");
+        redraw();
+        return;
+    }
 
-static void begin_microphone_capture(void)
-{
-    microphone_detail[0] = '\0';
     if (!microphone_begin_capture(
             microphone_detail,
             sizeof(microphone_detail)
         )) {
+        network_audio_stream_abort();
         snprintf(response, sizeof(response), "%s", microphone_detail);
         set_view_state("Microphone error");
         redraw();
         return;
     }
 
-    response_scroll_lines = 0;
+    microphone_stream_size = 0;
     snprintf(
         response,
         sizeof(response),
-        "Recording signed 16-bit mono PCM. Speak while holding R, then release to upload the WAV file."
+        "Streaming signed 16-bit mono PCM to the laptop while R is held. Release R to finalize latest.wav."
     );
     recording_session_active = true;
-    set_view_state("Recording...");
+    set_view_state("Streaming audio...");
     redraw();
 }
 
 static void update_microphone_capture(void)
 {
-    if (!microphone_is_sampling()) {
-        return;
-    }
-
-    if (!microphone_poll_capture(
-            microphone_detail,
-            sizeof(microphone_detail)
-        )) {
-        snprintf(response, sizeof(response), "%s", microphone_detail);
-        recording_session_active = false;
-        set_view_state("Microphone error");
-        redraw();
+    if (!drain_microphone_samples()) {
+        const char *detail = microphone_detail[0] != '\0'
+            ? microphone_detail
+            : network_detail;
+        stop_failed_microphone_stream(detail);
         return;
     }
 
     if (microphone_capture_is_full()) {
-        set_view_state("Full - release R");
+        set_view_state("5-minute limit reached");
     }
     redraw();
 }
 
-static void finish_microphone_capture(void)
+static void finish_microphone_capture(bool maximum_reached)
 {
     if (!microphone_finish_capture(
             microphone_detail,
             sizeof(microphone_detail)
         )) {
-        snprintf(response, sizeof(response), "%s", microphone_detail);
-        recording_session_active = false;
-        set_view_state("Microphone error");
-        redraw();
+        stop_failed_microphone_stream(microphone_detail);
+        return;
+    }
+
+    if (!drain_microphone_samples()
+        || !send_microphone_stream_buffer(true)) {
+        const char *detail = microphone_detail[0] != '\0'
+            ? microphone_detail
+            : network_detail;
+        stop_failed_microphone_stream(detail);
+        return;
+    }
+
+    size_t total_pcm_size = microphone_total_pcm_size();
+    if (total_pcm_size == 0) {
+        stop_failed_microphone_stream("No microphone samples were captured.");
+        return;
+    }
+
+    set_view_state("Finalizing audio...");
+    redraw();
+    present_frame();
+    response[0] = '\0';
+    if (!network_audio_stream_finish(
+            response,
+            sizeof(response),
+            network_detail,
+            sizeof(network_detail)
+        )) {
+        stop_failed_microphone_stream(network_detail);
         return;
     }
 
     recording_session_active = false;
+    microphone_stream_size = 0;
     snprintf(
         microphone_detail,
         sizeof(microphone_detail),
-        "Captured %u PCM bytes in %u ms",
-        (unsigned int)microphone_pcm_size(),
+        "Streamed %u PCM bytes in %u ms",
+        (unsigned int)total_pcm_size,
         microphone_duration_ms()
     );
-    set_view_state("Capture complete");
+    network_detail[0] = '\0';
+    set_view_state(
+        maximum_reached ? "5-minute stream complete" : "Audio stream complete"
+    );
     redraw();
-    present_frame();
-    upload_microphone_capture();
 }
 
 static void change_scroll(bool scroll_up)
@@ -490,8 +559,12 @@ int main(int argc, char **argv)
 
         if (recording_session_active) {
             update_microphone_capture();
-            if ((keys_up & KEY_R) != 0) {
-                finish_microphone_capture();
+            if (recording_session_active
+                && (keys_up & KEY_R) != 0) {
+                finish_microphone_capture(false);
+            } else if (recording_session_active
+                && microphone_capture_is_full()) {
+                finish_microphone_capture(true);
             }
             present_frame();
             continue;
@@ -520,10 +593,6 @@ int main(int argc, char **argv)
                 snprintf(prompt, sizeof(prompt), "incremental output demo");
             }
             run_request("/stream", "Stream complete");
-        }
-
-        if ((keys_down & KEY_Y) != 0) {
-            upload_microphone_capture();
         }
 
         handle_scroll_input(keys_down, keys_held);

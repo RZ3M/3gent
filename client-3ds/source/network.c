@@ -25,6 +25,7 @@
 
 static u32 *soc_buffer = NULL;
 static bool soc_ready = false;
+static int audio_stream_socket = -1;
 
 static void set_error(char *error, size_t capacity, const char *message)
 {
@@ -89,6 +90,8 @@ bool network_start(char *error, size_t error_capacity)
 
 void network_stop(void)
 {
+    network_audio_stream_abort();
+
     if (soc_ready) {
         socExit();
         soc_ready = false;
@@ -559,4 +562,190 @@ bool network_post_text(
         progress_callback,
         progress_user_data
     );
+}
+
+bool network_audio_stream_begin(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (!soc_ready) {
+        set_error(error, error_capacity, "network service is not initialized");
+        return false;
+    }
+    if (audio_stream_socket >= 0) {
+        set_error(error, error_capacity, "audio stream is already active");
+        return false;
+    }
+    if (host == NULL || path == NULL || path[0] != '/') {
+        set_error(error, error_capacity, "invalid audio stream request");
+        return false;
+    }
+
+    struct sockaddr_in server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &server_address.sin_addr) != 1) {
+        set_error(error, error_capacity, "server host must be a numeric IPv4 address");
+        return false;
+    }
+
+    int socket_fd = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (socket_fd < 0) {
+        set_errno_error(error, error_capacity, "socket", errno);
+        return false;
+    }
+
+    if (!connect_with_timeout(
+            socket_fd,
+            (const struct sockaddr *)&server_address,
+            sizeof(server_address),
+            error,
+            error_capacity
+        )) {
+        close(socket_fd);
+        return false;
+    }
+
+    char request_header[HTTP_REQUEST_HEADER_CAPACITY];
+    int request_size = snprintf(
+        request_header,
+        sizeof(request_header),
+        "POST %s HTTP/1.1\r\n"
+        "Host: %s:%u\r\n"
+        "User-Agent: 3gent/%s\r\n"
+        "Content-Type: application/x-3gent-pcm; "
+            "format=s16le; rate=16364; channels=1\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        path,
+        host,
+        (unsigned int)port,
+        THREEGENT_APP_VERSION
+    );
+    if (request_size < 0
+        || (size_t)request_size >= sizeof(request_header)
+        || !send_all(
+            socket_fd,
+            request_header,
+            (size_t)request_size,
+            error,
+            error_capacity
+        )) {
+        if (request_size >= 0
+            && (size_t)request_size >= sizeof(request_header)) {
+            set_error(
+                error,
+                error_capacity,
+                "audio stream header exceeded the bounded buffer"
+            );
+        }
+        close(socket_fd);
+        return false;
+    }
+
+    audio_stream_socket = socket_fd;
+    return true;
+}
+
+bool network_audio_stream_write(
+    const void *data,
+    size_t size,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (audio_stream_socket < 0) {
+        set_error(error, error_capacity, "audio stream is not active");
+        return false;
+    }
+    if (data == NULL || size == 0) {
+        set_error(error, error_capacity, "audio stream chunk is empty");
+        return false;
+    }
+
+    char chunk_header[24];
+    int header_size = snprintf(
+        chunk_header,
+        sizeof(chunk_header),
+        "%x\r\n",
+        (unsigned int)size
+    );
+    if (header_size < 0 || (size_t)header_size >= sizeof(chunk_header)
+        || !send_all(
+            audio_stream_socket,
+            chunk_header,
+            (size_t)header_size,
+            error,
+            error_capacity
+        )
+        || !send_all(
+            audio_stream_socket,
+            (const char *)data,
+            size,
+            error,
+            error_capacity
+        )
+        || !send_all(
+            audio_stream_socket,
+            "\r\n",
+            2,
+            error,
+            error_capacity
+        )) {
+        network_audio_stream_abort();
+        return false;
+    }
+
+    return true;
+}
+
+bool network_audio_stream_finish(
+    char *response,
+    size_t response_capacity,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (audio_stream_socket < 0) {
+        set_error(error, error_capacity, "audio stream is not active");
+        return false;
+    }
+
+    int socket_fd = audio_stream_socket;
+    bool success = send_all(
+        socket_fd,
+        "0\r\n\r\n",
+        5,
+        error,
+        error_capacity
+    );
+    if (success) {
+        success = read_http_response(
+            socket_fd,
+            response,
+            response_capacity,
+            error,
+            error_capacity,
+            NULL,
+            NULL
+        );
+    }
+
+    close(socket_fd);
+    audio_stream_socket = -1;
+    return success;
+}
+
+void network_audio_stream_abort(void)
+{
+    if (audio_stream_socket >= 0) {
+        close(audio_stream_socket);
+        audio_stream_socket = -1;
+    }
 }

@@ -37,4 +37,28 @@ bool network_post_bytes(
     void *progress_user_data
 );
 
+bool network_audio_stream_begin(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *error,
+    size_t error_capacity
+);
+
+bool network_audio_stream_write(
+    const void *data,
+    size_t size,
+    char *error,
+    size_t error_capacity
+);
+
+bool network_audio_stream_finish(
+    char *response,
+    size_t response_capacity,
+    char *error,
+    size_t error_capacity
+);
+
+void network_audio_stream_abort(void);
+
 #endif

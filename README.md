@@ -33,7 +33,7 @@ The Stage 0A-E implementation now lives in `client-3ds/` and
 - a bounded, timeout-controlled local HTTP request;
 - visible connecting, success, cancellation, and error states;
 - incremental response rendering with bounded scrollback and held-button navigation;
-- bounded push-to-talk microphone capture and WAV upload;
+- bounded-memory push-to-talk microphone streaming and laptop-side WAV output;
 - a standard-library development server with automated tests and inspectable
   audio output.
 

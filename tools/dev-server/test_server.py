@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import http.client
-import io
 import tempfile
 import threading
+import time
 import unittest
 import wave
 from pathlib import Path
 
 from server import (
+    AUDIO_BYTES_PER_SECOND,
     DevelopmentServer,
     EchoHandler,
-    MAX_AUDIO_BYTES,
     MAX_REQUEST_BYTES,
 )
 
@@ -29,6 +29,7 @@ class EchoServerTests(unittest.TestCase):
             ("127.0.0.1", 0),
             FastEchoHandler,
             cls.capture_directory,
+            1,
         )
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -54,6 +55,34 @@ class EchoServerTests(unittest.TestCase):
         response_body = response.read()
         connection.close()
         return response.status, response_body
+
+    def stream_audio(
+        self,
+        chunks: list[bytes],
+    ) -> tuple[int, bytes]:
+        connection = self.open_audio_stream()
+
+        for chunk in chunks:
+            connection.send(f"{len(chunk):x}\r\n".encode())
+            connection.send(chunk)
+            connection.send(b"\r\n")
+        connection.send(b"0\r\n\r\n")
+
+        response = connection.getresponse()
+        response_body = response.read()
+        connection.close()
+        return response.status, response_body
+
+    def open_audio_stream(self) -> http.client.HTTPConnection:
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=2)
+        connection.putrequest("POST", "/audio/stream")
+        connection.putheader(
+            "Content-Type",
+            "application/x-3gent-pcm; format=s16le; rate=16364; channels=1",
+        )
+        connection.putheader("Transfer-Encoding", "chunked")
+        connection.endheaders()
+        return connection
 
     def test_health(self) -> None:
         status, body = self.request("GET", "/health")
@@ -83,61 +112,87 @@ class EchoServerTests(unittest.TestCase):
         self.assertIn(b"Chunk 24", body)
         self.assertIn(b"Stream complete", body)
 
-    def test_saves_bounded_pcm_wav(self) -> None:
-        wav_data = io.BytesIO()
-        with wave.open(wav_data, "wb") as recording:
-            recording.setnchannels(1)
-            recording.setsampwidth(2)
-            recording.setframerate(16364)
-            recording.writeframes(b"\x00\x00\x10\x00")
-
-        body = wav_data.getvalue()
-        status, response = self.request(
-            "POST",
-            "/audio",
-            body,
-            {"Content-Type": "audio/wav"},
-        )
+    def test_streams_pcm_chunks_into_wav(self) -> None:
+        pcm_data = b"\x00\x00\x10\x00\x20\x00\x30\x00"
+        status, response = self.stream_audio([pcm_data[:4], pcm_data[4:]])
         self.assertEqual(status, 200)
         self.assertIn(b"saved", response)
-        self.assertEqual(
-            (self.capture_directory / "latest.wav").read_bytes(),
-            body,
-        )
+        with wave.open(str(self.capture_directory / "latest.wav"), "rb") as saved:
+            self.assertEqual(saved.getnchannels(), 1)
+            self.assertEqual(saved.getsampwidth(), 2)
+            self.assertEqual(saved.getframerate(), 16364)
+            self.assertEqual(saved.readframes(saved.getnframes()), pcm_data)
 
-    def test_rejects_invalid_audio(self) -> None:
-        status, _ = self.request(
-            "POST",
-            "/audio",
-            b"not a wav",
-            {"Content-Type": "audio/wav"},
-        )
+    def test_writes_temporary_wav_before_stream_finishes(self) -> None:
+        connection = self.open_audio_stream()
+        try:
+            pcm_data = b"\x00\x00" * 8192
+            connection.send(f"{len(pcm_data):x}\r\n".encode())
+            connection.send(pcm_data)
+            connection.send(b"\r\n")
+
+            temporary_path = self.capture_directory / "latest.wav.tmp"
+            deadline = time.monotonic() + 1
+            while time.monotonic() < deadline:
+                if temporary_path.exists() and temporary_path.stat().st_size > 44:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(temporary_path.exists())
+            self.assertGreater(temporary_path.stat().st_size, 44)
+
+            connection.send(b"0\r\n\r\n")
+            response = connection.getresponse()
+            response.read()
+            self.assertEqual(response.status, 200)
+        finally:
+            connection.close()
+
+    def test_rejects_empty_audio_stream(self) -> None:
+        status, _ = self.stream_audio([])
         self.assertEqual(status, 400)
 
-    def test_rejects_truncated_audio(self) -> None:
-        wav_data = io.BytesIO()
-        with wave.open(wav_data, "wb") as recording:
-            recording.setnchannels(1)
-            recording.setsampwidth(2)
-            recording.setframerate(16364)
-            recording.writeframes(b"\x00\x00\x10\x00")
-
-        status, _ = self.request(
-            "POST",
-            "/audio",
-            wav_data.getvalue()[:-2],
-            {"Content-Type": "audio/wav"},
-        )
+    def test_rejects_incomplete_pcm16_sample(self) -> None:
+        status, _ = self.stream_audio([b"\x00"])
         self.assertEqual(status, 400)
 
-    def test_rejects_oversized_audio(self) -> None:
-        status, _ = self.request(
-            "POST",
-            "/audio",
-            b"x" * (MAX_AUDIO_BYTES + 1),
-            {"Content-Type": "audio/wav"},
-        )
+    def test_rejects_audio_stream_over_duration_limit(self) -> None:
+        status, _ = self.stream_audio([b"\x00" * (AUDIO_BYTES_PER_SECOND + 2)])
         self.assertEqual(status, 413)
+
+    def test_rejects_non_streaming_audio_format(self) -> None:
+        status, _ = self.request(
+            "POST",
+            "/audio/stream",
+            b"not pcm",
+            {"Content-Type": "audio/wav"},
+        )
+        self.assertEqual(status, 415)
+
+    def test_disconnect_discards_partial_stream(self) -> None:
+        capture_path = self.capture_directory / "latest.wav"
+        temporary_path = self.capture_directory / "latest.wav.tmp"
+        previous_capture = b"previous completed capture"
+        capture_path.write_bytes(previous_capture)
+
+        connection = self.open_audio_stream()
+        pcm_data = b"\x00\x00" * 8192
+        connection.send(f"{len(pcm_data):x}\r\n".encode())
+        connection.send(pcm_data)
+        connection.send(b"\r\n")
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            if temporary_path.exists() and temporary_path.stat().st_size > 44:
+                break
+            time.sleep(0.01)
+        self.assertTrue(temporary_path.exists())
+        connection.close()
+
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and temporary_path.exists():
+            time.sleep(0.01)
+        self.assertFalse(temporary_path.exists())
+        self.assertEqual(capture_path.read_bytes(), previous_capture)
 
 
 if __name__ == "__main__":

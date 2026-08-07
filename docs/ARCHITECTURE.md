@@ -324,8 +324,12 @@ This is a conceptual model, not a frozen serialization schema.
 ### Voice
 
 ```text
-mic → bounded local recording → upload → transcribe → prompt → agent
+mic → bounded capture/stream → desktop media handling → transcribe → prompt → agent
 ```
+
+Whether production voice transport streams during capture or uploads after
+release remains a measured transport decision. The Stage 0 live-streaming spike
+uses fixed client buffers and laptop-side WAV assembly.
 
 ### Text
 

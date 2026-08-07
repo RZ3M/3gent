@@ -1,7 +1,7 @@
 #ifndef THREEGENT_APP_CONFIG_H
 #define THREEGENT_APP_CONFIG_H
 
-#define THREEGENT_APP_VERSION "0.0.5-stage0"
+#define THREEGENT_APP_VERSION "0.0.6-stage0"
 
 /*
  * Stage 0 uses a compile-time numeric IPv4 address deliberately. Override it

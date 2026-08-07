@@ -74,7 +74,7 @@
 - result is displayed by 3gent;
 - cancel behavior works.
 
-**2026-08-07 implementation record:**
+**2026-08-07 buffered implementation record (superseded before hardware test):**
 
 - The client uses `swkbdInit`, explicit Cancel/Send buttons,
   `swkbdInputText`, and `swkbdGetResult`, following the current official libctru
@@ -250,6 +250,36 @@ Start with raw/simple capture. Compression is a later optimization.
 - Hardware status: microphone initialization, level behavior, captured quality,
   exact duration/byte count, maximum-duration stop, upload latency, shell-close
   behavior, and Old/New 3DS model remain unmeasured. No hardware pass is claimed.
+
+**2026-08-07 live-streaming revision:**
+
+- Hardware feedback identified the fixed ten-second duration as unsuitable. The
+  user requested direct microphone streaming rather than a larger whole-capture
+  buffer.
+- Version `0.0.6-stage0` opens one HTTP/1.1 chunked request before MIC sampling,
+  drains the service ring every frame, and sends signed little-endian PCM in
+  approximately 4 KiB chunks while `R` remains held.
+- The client uses the 196,608-byte aligned MIC service ring plus one fixed 8 KiB
+  outgoing buffer: 204,800 bytes dedicated to the audio path, independent of
+  recording duration. The superseded whole-WAV buffer was removed.
+- Releasing `R` stops MIC sampling, drains the final samples, sends the HTTP
+  end-of-stream marker, and waits for the development server to finalize
+  `latest.wav`.
+- The default per-capture ceiling is five minutes (9,818,400 PCM bytes and a
+  9,818,444-byte WAV). It bounds development disk/network use rather than client
+  memory and is configurable on the server.
+- The server streams PCM directly into a temporary WAV and atomically replaces
+  `latest.wav` only after a valid, non-empty, complete PCM16 stream. Empty, odd,
+  malformed, wrong-format, concurrent, and over-limit streams are rejected or
+  discarded without replacing the last good capture.
+- Failure behavior changed intentionally: because the 3DS no longer retains the
+  whole capture, a failed live stream cannot be retried from handheld memory.
+  The app stops with a visible error and the user records again.
+- Host result: the client builds cleanly and twelve development-server tests pass,
+  including multi-chunk WAV assembly and stream limit/format validation.
+- Hardware status remains TODO: sustained streaming, visual level behavior,
+  audio quality, Wi-Fi stalls, mid-stream server loss, shell close/resume, and
+  actual Old/New 3DS model behavior are not yet measured.
 
 ---
 

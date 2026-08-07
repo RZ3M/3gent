@@ -6,8 +6,8 @@ This client tests the five Stage 0 3DS boundaries:
 2. retrieve text from the native software keyboard;
 3. send that text to a LAN development server and display its response;
 4. append, wrap, and scroll a deliberately streamed response;
-5. hold a physical button to capture bounded microphone audio and upload it as
-   a WAV file.
+5. hold a physical button to stream bounded-memory microphone audio while the
+   laptop assembles an inspectable WAV file.
 
 This is a development spike, not the production bridge or protocol. The basic
 keyboard, LAN echo path, incremental rendering, and held scroll navigation have
@@ -16,8 +16,11 @@ hardware check.
 
 The microphone spike uses the current libctru MIC service with signed 16-bit
 mono PCM at the `MICU_SAMPLE_RATE_16360` setting (approximately 16,364.479 Hz).
-The generated WAV declares the rounded integer rate of 16,364 Hz. Capture is
-strictly limited to ten seconds: 327,280 PCM bytes plus a 44-byte WAV header.
+The generated WAV declares the rounded integer rate of 16,364 Hz. The client
+opens one HTTP/1.1 chunked stream while `R` is held, sends PCM in approximately
+4 KiB pieces, and retains only an 8 KiB outgoing buffer. A five-minute safety
+ceiling bounds each development capture without making memory usage grow with
+duration.
 
 ## Prerequisites
 
@@ -94,7 +97,7 @@ with the result.
 2. Launch 3gent from the Homebrew Launcher.
 3. Confirm that both screens clear and render without corruption.
 4. Confirm that the top screen shows `3gent`, `Stage 0A-E`, and version
-   `0.0.5-stage0`.
+   `0.0.6-stage0`.
 5. Confirm that the bottom screen shows the configured IP address and reports the
    network service as ready.
 6. Press `A`; confirm that the native software keyboard opens.
@@ -109,25 +112,28 @@ with the result.
 13. Press and hold D-pad or Circle Pad Up and Down; confirm that scrolling moves
     once immediately, repeats after a short delay, stops on release, and that the
     bottom screen reports the scroll position.
-14. Hold `R`, speak for two to five seconds, and confirm that the recording timer
-    and level indicator both update while the button is held.
-15. Release `R`; confirm that recording stops, the app reports the captured byte
-    count and duration, and the server logs an `/audio` upload.
-16. Confirm that `tools/dev-server/captures/latest.wav` exists on the computer,
+14. Hold `R`, speak for at least fifteen seconds, and confirm that the streaming
+    timer and level indicator both update for the full duration.
+15. While still holding `R`, confirm that
+    `tools/dev-server/captures/latest.wav.tmp` exists and grows on the laptop.
+    This distinguishes live streaming from a release-time upload.
+16. Release `R`; confirm that streaming stops, the app reports the transmitted
+    PCM byte count and duration, and the server logs an `/audio/stream` request.
+17. Confirm that `tools/dev-server/captures/latest.wav` exists on the computer,
     opens in an audio player, has the expected duration, and contains intelligible
     microphone audio.
-17. Hold `R` for more than ten seconds; confirm capture stops growing at ten
-    seconds, shows `Full - release R`, and uploads only after release.
 18. Stop the server and send text again; confirm that an error or timeout appears
     within roughly five seconds.
-19. With the server stopped, record and release a short audio clip; confirm the
-    app reports an upload error without losing the completed recording. Restart
-    the server, press `Y`, and confirm the retained WAV uploads successfully.
-20. Restart the server and confirm that `A` or `X` retries successfully without
-    restarting the 3DS app.
-21. Start recording, close and reopen the shell, then release `R`; record whether
+19. With the server stopped, hold `R`; confirm stream setup fails visibly within
+    roughly five seconds and microphone capture does not begin.
+20. Restart the server, begin another recording, then stop the server while `R`
+    remains held. Confirm the app exits recording with a visible stream error and
+    does not replace the last completed `latest.wav` with a partial capture.
+21. Restart the server and confirm that `A`, `X`, or a new `R` press retries
+    successfully without restarting the 3DS app.
+22. Start recording, close and reopen the shell, then release `R`; record whether
     the app resumes, stops, errors, or captures unexpected audio.
-22. Press `START`; confirm that the app exits cleanly to the Homebrew Launcher.
+23. Press `START`; confirm that the app exits cleanly to the Homebrew Launcher.
 
 Do not mark `R-001`, `R-002`, or the 3DS portion of `R-003` proven until these
 steps have been performed on hardware.
@@ -146,5 +152,6 @@ steps have been performed on hardware.
   HTTP response larger than its fixed development buffer.
 - `Mic: unavailable`: record the hexadecimal on-screen MIC service error,
   exit any other software using the microphone, and restart the app.
-- `Upload error - retry Y`: leave the app open, restore the development server,
-  and press `Y`; the most recent completed WAV remains in the bounded buffer.
+- `Audio stream error`: restore the development server and press `R` again. A
+  failed live stream is discarded; only a fully finalized capture replaces
+  `latest.wav`.

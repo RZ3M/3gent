@@ -136,3 +136,23 @@ Candidates can be evaluated separately; do not insert a LICENSE file silently.
 
 **Question:**
 Should the bridge launch agents itself, integrate with a multiplexer such as Herdr, attach to existing agent sessions, or support all three via adapters?
+
+### D-P08 — Voice capture transport
+
+**Status:** Proposed / Stage 0 experiment
+
+Candidate A: buffer a complete bounded capture on the 3DS, then upload.
+- tolerates a temporarily unavailable connection after recording;
+- simple file-oriented retry;
+- recording duration consumes scarce handheld memory or SD-card I/O.
+
+Candidate B: stream PCM while push-to-talk is held, then finalize media on the
+desktop.
+- constant and small 3DS memory use;
+- removes handheld RAM as the practical duration limit;
+- exposes connection stalls during capture and requires clean partial-stream
+  handling.
+
+Stage 0 uses Candidate B over a disposable HTTP chunked endpoint. Keep the
+production decision Proposed until physical 3DS, hotspot, reconnect, and remote
+transport behavior are measured.

@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import argparse
-import io
 import sys
+import threading
 import time
 import wave
 from http import HTTPStatus
@@ -13,13 +13,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 MAX_REQUEST_BYTES = 4 * 1024
-MAX_AUDIO_BYTES = 384 * 1024
+DEFAULT_MAX_AUDIO_SECONDS = 300
+AUDIO_SAMPLE_RATE = 16364
+AUDIO_BYTES_PER_SECOND = AUDIO_SAMPLE_RATE * 2
 RESPONSE_PREFIX = "hello from 3gent dev server: "
 DEFAULT_CAPTURE_DIRECTORY = Path(__file__).resolve().parent / "captures"
 
 
+class ChunkedBodyError(Exception):
+    """Raised when an HTTP chunked request body is malformed."""
+
+
+class AudioStreamTooLarge(Exception):
+    """Raised when a streamed capture crosses its configured limit."""
+
+
 class EchoHandler(BaseHTTPRequestHandler):
-    server_version = "3gent-stage0/0.0.5"
+    server_version = "3gent-stage0/0.0.6"
     stream_delay_seconds = 0.08
 
     def _send_text(self, status: HTTPStatus, text: str) -> None:
@@ -69,57 +79,123 @@ class EchoHandler(BaseHTTPRequestHandler):
             self._send_text(HTTPStatus.BAD_REQUEST, "request body must be UTF-8")
             return None
 
-    def _save_audio(self) -> None:
-        if self.headers.get_content_type() != "audio/wav":
-            self._send_text(HTTPStatus.UNSUPPORTED_MEDIA_TYPE, "audio/wav required")
-            return
+    def _read_audio_chunk(self, remaining_limit: int) -> bytes | None:
+        size_line = self.rfile.readline(64)
+        if not size_line or not size_line.endswith(b"\r\n"):
+            raise ChunkedBodyError("incomplete chunk size")
 
-        body = self._read_body(MAX_AUDIO_BYTES)
-        if body is None:
-            return
-
+        size_token = size_line[:-2].split(b";", 1)[0].strip()
         try:
-            with wave.open(io.BytesIO(body), "rb") as recording:
-                frame_count = recording.getnframes()
-                expected_pcm_bytes = (
-                    frame_count
-                    * recording.getnchannels()
-                    * recording.getsampwidth()
-                )
-                pcm_bytes = recording.readframes(frame_count)
-                valid_format = (
-                    recording.getnchannels() == 1
-                    and recording.getsampwidth() == 2
-                    and recording.getframerate() == 16364
-                    and recording.getcomptype() == "NONE"
-                    and frame_count > 0
-                    and len(pcm_bytes) == expected_pcm_bytes
-                )
-        except (EOFError, wave.Error):
-            valid_format = False
+            chunk_size = int(size_token, 16)
+        except ValueError as error:
+            raise ChunkedBodyError("invalid chunk size") from error
 
+        if chunk_size < 0:
+            raise ChunkedBodyError("invalid chunk size")
+        if chunk_size == 0:
+            trailer = self.rfile.readline(1024)
+            while trailer not in {b"\r\n", b""}:
+                if not trailer.endswith(b"\r\n"):
+                    raise ChunkedBodyError("invalid chunk trailer")
+                trailer = self.rfile.readline(1024)
+            return None
+        if chunk_size > remaining_limit:
+            raise AudioStreamTooLarge
+
+        chunk = self.rfile.read(chunk_size)
+        if len(chunk) != chunk_size or self.rfile.read(2) != b"\r\n":
+            raise ChunkedBodyError("incomplete chunk data")
+        return chunk
+
+    def _save_audio_stream(self) -> None:
+        content_type = self.headers.get_content_type().lower()
+        valid_format = (
+            content_type == "application/x-3gent-pcm"
+            and self.headers.get_param("format") == "s16le"
+            and self.headers.get_param("rate") == "16364"
+            and self.headers.get_param("channels") == "1"
+        )
         if not valid_format:
             self._send_text(
-                HTTPStatus.BAD_REQUEST,
-                "expected non-empty mono PCM16 WAV at 16364 Hz",
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                "expected application/x-3gent-pcm s16le/16364Hz/mono",
             )
             return
 
+        transfer_encodings = {
+            value.strip().lower()
+            for value in self.headers.get("Transfer-Encoding", "").split(",")
+        }
+        if "chunked" not in transfer_encodings:
+            self._send_text(
+                HTTPStatus.BAD_REQUEST,
+                "chunked Transfer-Encoding required",
+            )
+            return
+
+        if not self.server.audio_stream_lock.acquire(blocking=False):
+            self._send_text(HTTPStatus.CONFLICT, "another audio stream is active")
+            return
+
         capture_directory = self.server.capture_directory
-        capture_directory.mkdir(parents=True, exist_ok=True)
         capture_path = capture_directory / "latest.wav"
         temporary_path = capture_directory / "latest.wav.tmp"
-        temporary_path.write_bytes(body)
-        temporary_path.replace(capture_path)
+        total_pcm_bytes = 0
 
+        try:
+            capture_directory.mkdir(parents=True, exist_ok=True)
+            with temporary_path.open("w+b", buffering=0) as output_file:
+                with wave.open(output_file, "wb") as recording:
+                    recording.setnchannels(1)
+                    recording.setsampwidth(2)
+                    recording.setframerate(AUDIO_SAMPLE_RATE)
+
+                    while True:
+                        chunk = self._read_audio_chunk(
+                            self.server.max_audio_pcm_bytes - total_pcm_bytes
+                        )
+                        if chunk is None:
+                            break
+                        recording.writeframesraw(chunk)
+                        total_pcm_bytes += len(chunk)
+
+            if total_pcm_bytes == 0 or total_pcm_bytes % 2 != 0:
+                temporary_path.unlink(missing_ok=True)
+                self._send_text(
+                    HTTPStatus.BAD_REQUEST,
+                    "audio stream must contain complete PCM16 samples",
+                )
+                return
+
+            temporary_path.replace(capture_path)
+        except AudioStreamTooLarge:
+            temporary_path.unlink(missing_ok=True)
+            self._send_text(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                f"audio stream exceeds {self.server.max_audio_seconds} seconds",
+            )
+            return
+        except ChunkedBodyError as error:
+            temporary_path.unlink(missing_ok=True)
+            self._send_text(HTTPStatus.BAD_REQUEST, str(error))
+            return
+        except OSError as error:
+            temporary_path.unlink(missing_ok=True)
+            self._send_text(HTTPStatus.INTERNAL_SERVER_ERROR, f"audio save failed: {error}")
+            return
+        finally:
+            self.server.audio_stream_lock.release()
+
+        duration_ms = total_pcm_bytes * 1000 // AUDIO_BYTES_PER_SECOND
         print(
-            f"audio from {self.client_address[0]}: {len(body)} bytes, "
-            f"saved to {capture_path}",
+            f"audio stream from {self.client_address[0]}: {total_pcm_bytes} PCM "
+            f"bytes, {duration_ms} ms, saved to {capture_path}",
             flush=True,
         )
         self._send_text(
             HTTPStatus.OK,
-            f"saved {len(body)}-byte WAV as {capture_path}",
+            f"saved {total_pcm_bytes + 44}-byte WAV ({duration_ms} ms) as "
+            f"{capture_path}",
         )
 
     def _send_stream(self, message: str) -> None:
@@ -158,8 +234,8 @@ class EchoHandler(BaseHTTPRequestHandler):
         self._send_text(HTTPStatus.OK, "3gent Stage 0 server is ready")
 
     def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
-        if self.path == "/audio":
-            self._save_audio()
+        if self.path == "/audio/stream":
+            self._save_audio_stream()
             return
 
         if self.path not in {"/echo", "/stream"}:
@@ -191,8 +267,14 @@ class DevelopmentServer(ThreadingHTTPServer):
         server_address: tuple[str, int],
         handler: type[BaseHTTPRequestHandler],
         capture_directory: Path = DEFAULT_CAPTURE_DIRECTORY,
+        max_audio_seconds: int = DEFAULT_MAX_AUDIO_SECONDS,
     ) -> None:
+        if max_audio_seconds <= 0:
+            raise ValueError("max_audio_seconds must be positive")
         self.capture_directory = capture_directory
+        self.max_audio_seconds = max_audio_seconds
+        self.max_audio_pcm_bytes = max_audio_seconds * AUDIO_BYTES_PER_SECOND
+        self.audio_stream_lock = threading.Lock()
         super().__init__(server_address, handler)
 
     def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
@@ -220,6 +302,12 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CAPTURE_DIRECTORY,
         help="directory for the latest Stage 0 microphone WAV",
     )
+    parser.add_argument(
+        "--max-audio-seconds",
+        type=int,
+        default=DEFAULT_MAX_AUDIO_SECONDS,
+        help="maximum duration of one streamed microphone capture",
+    )
     return parser.parse_args()
 
 
@@ -229,10 +317,12 @@ def main() -> None:
         (args.host, args.port),
         EchoHandler,
         args.capture_dir,
+        args.max_audio_seconds,
     )
     print(
         f"3gent Stage 0 server listening on http://{args.host}:{args.port}\n"
         f"Microphone captures will be saved to {args.capture_dir / 'latest.wav'}\n"
+        f"Maximum microphone stream: {args.max_audio_seconds} seconds\n"
         "DEVELOPMENT ONLY: no authentication; use disposable test data.",
         flush=True,
     )

@@ -24,10 +24,15 @@ Binding to `0.0.0.0` exposes the unauthenticated endpoint to devices that can
 reach the computer. Use only disposable test text and stop the server after the
 test.
 
-By default, a valid microphone upload is written to
+By default, a completed microphone stream is written to
 `tools/dev-server/captures/latest.wav`. Use `--capture-dir PATH` to select a
-different output directory. A successful upload atomically replaces the prior
+different output directory. A successful stream atomically replaces the prior
 `latest.wav`.
+
+Each audio stream is limited to five minutes by default. Override the development
+limit with `--max-audio-seconds SECONDS`. The server writes incoming PCM to a
+temporary WAV while recording and promotes it to `latest.wav` only after a clean
+end-of-stream marker.
 
 ## Check from the computer
 
@@ -53,8 +58,8 @@ From the repository root:
 python3 -m unittest discover -s tools/dev-server -p 'test_*.py' -v
 ```
 
-The tests cover health, UTF-8 echo, the incremental stream fixture, unknown
-paths, text and audio size limits, WAV validation, and audio saving.
+The tests cover health, UTF-8 echo, the incremental output fixture, unknown
+paths, streamed PCM framing/format/size limits, and WAV finalization.
 
 ## Interface
 
@@ -62,8 +67,8 @@ paths, text and audio size limits, WAV validation, and audio saving.
 - `POST /echo` accepts `text/plain` UTF-8 and returns a prefixed copy.
 - `POST /stream` returns a bounded multi-part fixture over roughly two seconds
   so the 3DS can prove incremental rendering and scrollback.
-- `POST /audio` accepts a non-empty mono PCM16 WAV at 16,364 Hz, saves it as
-  `latest.wav`, and rejects audio larger than 384 KiB.
+- `POST /audio/stream` accepts chunked signed little-endian mono PCM16 at
+  16,364 Hz and assembles `latest.wav` without buffering the capture in RAM.
 - Text requests larger than 4 KiB are rejected.
 - Responses include `Content-Length` and close the connection so the Stage 0
   client can parse them simply and predictably.
