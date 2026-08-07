@@ -11,8 +11,9 @@ This client tests the five Stage 0 3DS boundaries:
 
 This is a development spike, not the production bridge or protocol. The basic
 keyboard, LAN echo path, incremental rendering, and held scroll navigation have
-passed on physical hardware. The microphone path still needs its focused
-hardware check.
+passed on physical hardware. The first microphone hardware check exposed a
+repeatable client-side capture stall after one roughly 40 ms MIC update; version
+`0.0.7-stage0` contains a cache-coherency fix and focused on-screen diagnostics.
 
 The microphone spike uses the current libctru MIC service with signed 16-bit
 mono PCM at the `MICU_SAMPLE_RATE_16360` setting (approximately 16,364.479 Hz).
@@ -97,7 +98,7 @@ with the result.
 2. Launch 3gent from the Homebrew Launcher.
 3. Confirm that both screens clear and render without corruption.
 4. Confirm that the top screen shows `3gent`, `Stage 0A-E`, and version
-   `0.0.6-stage0`.
+   `0.0.7-stage0`.
 5. Confirm that the bottom screen shows the configured IP address and reports the
    network service as ready.
 6. Press `A`; confirm that the native software keyboard opens.
@@ -112,8 +113,10 @@ with the result.
 13. Press and hold D-pad or Circle Pad Up and Down; confirm that scrolling moves
     once immediately, repeats after a short delay, stops on release, and that the
     bottom screen reports the scroll position.
-14. Hold `R`, speak for at least fifteen seconds, and confirm that the streaming
-    timer and level indicator both update for the full duration.
+14. Hold `R`, speak for at least fifteen seconds. Confirm that `Held` tracks the
+    actual hold time, `PCM` keeps increasing at roughly the same rate, `pos` and
+    `changes` keep advancing, `MICU` remains `sampling`, and `no new data`
+    repeatedly returns near zero instead of growing continuously.
 15. While still holding `R`, confirm that
     `tools/dev-server/captures/latest.wav.tmp` exists and grows on the laptop.
     This distinguishes live streaming from a release-time upload.
@@ -155,3 +158,8 @@ steps have been performed on hardware.
 - `Audio stream error`: restore the development server and press `R` again. A
   failed live stream is discarded; only a fully finalized capture replaces
   `latest.wav`.
+- `MIC service stopped while R was held`: record the full on-screen message and
+  whether another title was using the microphone, then restart the app.
+- `Held` increases while `PCM`, `pos`, and `changes` remain frozen: photograph
+  the bottom screen before releasing `R`. Those counters distinguish a MIC
+  service stop from stale shared-memory visibility.

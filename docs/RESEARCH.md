@@ -206,7 +206,7 @@ Measure:
 
 **Question:** Can we reliably record push-to-talk audio into bounded memory/storage?
 
-**Status:** IMPLEMENTED / HOST BUILD AND ENDPOINT PASS / HARDWARE TODO
+**Status:** HARDWARE FAILURE OBSERVED / DIAGNOSTIC FIX READY FOR RETEST
 
 Determine:
 - actual libctru microphone API to use;
@@ -280,6 +280,30 @@ Start with raw/simple capture. Compression is a later optimization.
 - Hardware status remains TODO: sustained streaming, visual level behavior,
   audio quality, Wi-Fi stalls, mid-stream server loss, shell close/resume, and
   actual Old/New 3DS model behavior are not yet measured.
+
+**2026-08-07 first hardware result and diagnostic revision:**
+
+- Five completed hardware streams produced 10,846, 1,278, 1,310, 1,310, and
+  1,310 PCM bytes: approximately 331, 39, 40, 40, and 40 ms. The repeated 40 ms
+  results occurred despite holding `R` for varying, substantially longer times.
+- The latest 1,354-byte file was a structurally valid PCM16 mono WAV containing
+  1,310 PCM bytes (655 frames at 16,364 Hz), so WAV finalization and clean HTTP
+  stream completion worked. Its initial fragment was nearly silent (peak sample
+  magnitude 66 of 32,768), which is consistent with only the first MIC update
+  being captured and does not explain the duration failure.
+- This rules out the button-release path and server duration calculation as the
+  primary cause. The observed client write offset appeared to advance once and
+  then remain unchanged while the request stayed open.
+- Version `0.0.7-stage0` explicitly invalidates the ARM11 data-cache lines for
+  the MIC service's shared write-position marker and each unread PCM range before
+  consuming them. This is a hardware hypothesis, not yet a confirmed fix.
+- The same revision checks `MICU_IsSampling` during capture and separately shows
+  wall-clock hold duration, PCM duration, raw ring position, position-change
+  count, service sampling state, and milliseconds since new data. A premature
+  service stop now fails visibly instead of silently producing a short file.
+- Host result: the diagnostic client builds cleanly with the configured
+  devkitPro toolchain; all twelve development-server tests still pass. A focused
+  physical retest is required before R-005 can be marked proven.
 
 ---
 

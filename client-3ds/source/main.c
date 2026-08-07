@@ -155,7 +155,8 @@ static void draw_bottom(void)
     );
 
     if (recording_session_active) {
-        unsigned int duration_ms = microphone_duration_ms();
+        unsigned int wall_duration_ms = microphone_wall_duration_ms();
+        unsigned int pcm_duration_ms = microphone_duration_ms();
         unsigned int level = microphone_level_percent();
         unsigned int level_marks = level / 10;
         if (level_marks > 10) {
@@ -163,12 +164,23 @@ static void draw_bottom(void)
         }
 
         printf(
-            "Streaming: %u:%02u.%02u / %u:%02u\n",
-            duration_ms / 60000,
-            (duration_ms / 1000) % 60,
-            (duration_ms % 1000) / 10,
+            "Held: %u:%02u.%02u / %u:%02u\n",
+            wall_duration_ms / 60000,
+            (wall_duration_ms / 1000) % 60,
+            (wall_duration_ms % 1000) / 10,
             THREEGENT_MIC_MAX_SECONDS / 60,
             THREEGENT_MIC_MAX_SECONDS % 60
+        );
+        printf(
+            "PCM: %u ms | pos %lu | changes %u\n",
+            pcm_duration_ms,
+            (unsigned long)microphone_last_write_offset(),
+            microphone_offset_change_count()
+        );
+        printf(
+            "MICU: %s | no new data: %u ms\n",
+            microphone_service_is_sampling() ? "sampling" : "stopped",
+            microphone_stall_ms()
         );
         printf("Level: [");
         for (unsigned int mark = 0; mark < 10; mark++) {
@@ -468,9 +480,11 @@ static void finish_microphone_capture(bool maximum_reached)
     snprintf(
         microphone_detail,
         sizeof(microphone_detail),
-        "Streamed %u PCM bytes in %u ms",
+        "Held %u ms; captured %u ms (%u bytes, %u offset changes)",
+        microphone_wall_duration_ms(),
+        microphone_duration_ms(),
         (unsigned int)total_pcm_size,
-        microphone_duration_ms()
+        microphone_offset_change_count()
     );
     network_detail[0] = '\0';
     set_view_state(

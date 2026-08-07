@@ -29,7 +29,7 @@ class AudioStreamTooLarge(Exception):
 
 
 class EchoHandler(BaseHTTPRequestHandler):
-    server_version = "3gent-stage0/0.0.6"
+    server_version = "3gent-stage0/0.0.7"
     stream_delay_seconds = 0.08
 
     def _send_text(self, status: HTTPStatus, text: str) -> None:

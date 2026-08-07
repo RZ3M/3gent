@@ -27,7 +27,12 @@ bool microphone_is_sampling(void);
 bool microphone_capture_is_full(void);
 
 unsigned int microphone_duration_ms(void);
+unsigned int microphone_wall_duration_ms(void);
 unsigned int microphone_level_percent(void);
 size_t microphone_total_pcm_size(void);
+unsigned int microphone_last_write_offset(void);
+unsigned int microphone_offset_change_count(void);
+unsigned int microphone_stall_ms(void);
+bool microphone_service_is_sampling(void);
 
 #endif
