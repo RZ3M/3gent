@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -12,7 +13,7 @@ RESPONSE_PREFIX = "hello from 3gent dev server: "
 
 
 class EchoHandler(BaseHTTPRequestHandler):
-    server_version = "3gent-stage0/0.0.1"
+    server_version = "3gent-stage0/0.0.2"
 
     def _send_text(self, status: HTTPStatus, text: str) -> None:
         body = text.encode("utf-8")
@@ -76,6 +77,16 @@ class EchoHandler(BaseHTTPRequestHandler):
 
 class DevelopmentServer(ThreadingHTTPServer):
     allow_reuse_address = True
+
+    def handle_error(self, request: object, client_address: tuple[str, int]) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            print(
+                f"client {client_address[0]} disconnected before completion",
+                flush=True,
+            )
+            return
+        super().handle_error(request, client_address)
 
 
 def parse_args() -> argparse.Namespace:

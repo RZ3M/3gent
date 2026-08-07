@@ -145,23 +145,17 @@ static bool connect_with_timeout(
             return false;
         }
 
-        int socket_error = 0;
-        socklen_t socket_error_length = sizeof(socket_error);
-        if (getsockopt(
-                socket_fd,
-                SOL_SOCKET,
-                SO_ERROR,
-                &socket_error,
-                &socket_error_length
-            ) < 0) {
-            int saved_errno = errno;
-            set_errno_error(error, error_capacity, "getsockopt", saved_errno);
+        if (!FD_ISSET(socket_fd, &write_set)) {
+            set_error(error, error_capacity, "connect did not become writable");
             return false;
         }
-        if (socket_error != 0) {
-            set_errno_error(error, error_capacity, "connect", socket_error);
-            return false;
-        }
+
+        /*
+         * On libctru 2.7.0 hardware, SO_ERROR can expose the SOC service's
+         * unconverted -26 (EINPROGRESS) value even after the peer accepted the
+         * connection. A writable socket is allowed to continue here; the first
+         * bounded send reports any real connection failure.
+         */
     }
 
     /* Leave the socket non-blocking so all later waits remain bounded. */

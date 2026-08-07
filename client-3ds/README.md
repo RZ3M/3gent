@@ -76,7 +76,7 @@ with the result.
 2. Launch 3gent from the Homebrew Launcher.
 3. Confirm that both screens clear and render without corruption.
 4. Confirm that the top screen shows `3gent`, `Stage 0A-C`, and version
-   `0.0.1-stage0`.
+   `0.0.2-stage0`.
 5. Confirm that the bottom screen shows the configured IP address and reports the
    network service as ready.
 6. Press `A`; confirm that the native software keyboard opens.

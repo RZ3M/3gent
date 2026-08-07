@@ -6,7 +6,7 @@
 
 **Question:** Can we build and launch a minimal 3DSX with the current devkitPro toolchain?
 
-**Status:** HOST BUILD PASSED / HARDWARE TODO
+**Status:** HOST BUILD PASSED / HARDWARE PARTIAL PASS
 
 **Success:**
 - reproducible build command;
@@ -49,13 +49,22 @@
 - Conclusion: reproducible host compilation is proven. Launch, rendering, input,
   and clean exit still require the physical-hardware checklist.
 
+**2026-08-07 first hardware result:**
+
+- The 3DSX launched through the Homebrew Launcher.
+- Both screens rendered the expected Stage 0 interface and version label.
+- The `A` input path opened the keyboard, proving that the application loop and
+  button input were active.
+- Clean `START` exit was not reported and remains to be checked.
+- Hardware model still needs to be recorded.
+
 ---
 
 ## R-002 — Native software keyboard
 
 **Question:** Can 3gent open the built-in software keyboard and retrieve useful UTF text?
 
-**Status:** IMPLEMENTED / HARDWARE TODO
+**Status:** HARDWARE PARTIAL PASS
 
 **Primary reference:** libctru software keyboard API and official example.
 
@@ -74,13 +83,20 @@
 - Result: source implementation is ready, but keyboard launch, UTF-8 rendering,
   and cancellation have not been tested on a physical 3DS.
 
+**2026-08-07 first hardware result:**
+
+- The native keyboard opened and returned `hi`.
+- The entered text rendered correctly on the top screen after the keyboard
+  closed.
+- Cancel behavior and non-ASCII UTF-8 input remain to be tested.
+
 ---
 
 ## R-003 — Local networking
 
 **Question:** What is the simplest reliable way to send a small request from 3DS homebrew to a LAN server?
 
-**Status:** SERVER VERIFIED / 3DS CLIENT HARDWARE TODO
+**Status:** SERVER VERIFIED / 3DS TCP PARTIAL PASS / HTTP RETEST NEEDED
 
 Test:
 - DNS if needed;
@@ -108,6 +124,21 @@ Do not use this experiment as the production remote security design.
 - Result: the host endpoint is proven; 3DS socket behavior, LAN reachability,
   timeout behavior, and on-screen rendering remain unverified until the client
   builds and runs on hardware.
+
+**2026-08-07 first hardware result:**
+
+- The 3DS at `10.0.0.144` reached the Mac at `10.0.0.196:8080`; the Python
+  server accepted a TCP connection from source port 55059.
+- Before sending HTTP, the client displayed `connect failed (-26: )`, closed the
+  socket, and caused the server to report a connection reset.
+- Inspection showed that libctru 2.7.0's `getsockopt(SO_ERROR)` returned the SOC
+  service's raw `-26` (`EINPROGRESS`) value after `select` marked the socket
+  writable and the Mac had accepted it. The client incorrectly treated that raw
+  value as a final connection failure.
+- Version `0.0.2-stage0` removes that unreliable post-connect `SO_ERROR` check.
+  It proceeds after writability and relies on the bounded send/receive operations
+  to surface an actual failure. Hardware retest is required before HTTP round
+  trip success is claimed.
 
 ---
 
