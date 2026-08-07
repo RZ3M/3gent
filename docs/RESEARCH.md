@@ -6,7 +6,7 @@
 
 **Question:** Can we build and launch a minimal 3DSX with the current devkitPro toolchain?
 
-**Status:** HOST BUILD PASSED / HARDWARE PARTIAL PASS
+**Status:** HOST BUILD PASSED / HARDWARE CORE PASS / MODEL RECORD TODO
 
 **Success:**
 - reproducible build command;
@@ -64,7 +64,7 @@
 
 **Question:** Can 3gent open the built-in software keyboard and retrieve useful UTF text?
 
-**Status:** HARDWARE PARTIAL PASS
+**Status:** HARDWARE TEXT PASS / CANCEL AND NON-ASCII TODO
 
 **Primary reference:** libctru software keyboard API and official example.
 
@@ -96,7 +96,7 @@
 
 **Question:** What is the simplest reliable way to send a small request from 3DS homebrew to a LAN server?
 
-**Status:** SERVER VERIFIED / 3DS TCP PARTIAL PASS / HTTP RETEST NEEDED
+**Status:** CORE LAN ROUND TRIP HARDWARE PASS / FAILURE PATH TODO
 
 Test:
 - DNS if needed;
@@ -114,8 +114,8 @@ Do not use this experiment as the production remote security design.
 
 - Implemented a Python standard-library development server with `GET /health`
   and bounded `POST /echo` endpoints.
-- Four host tests pass: health, UTF-8 echo, unknown-path rejection, and rejection
-  of request bodies larger than 4 KiB.
+- Five host tests pass: health, UTF-8 echo, incremental stream fixture,
+  unknown-path rejection, and rejection of request bodies larger than 4 KiB.
 - Implemented a bounded raw-socket HTTP client using libctru's socket service.
   Connection, send, and receive waits are capped at five seconds with
   non-blocking sockets and `select`.
@@ -140,13 +140,25 @@ Do not use this experiment as the production remote security design.
   to surface an actual failure. Hardware retest is required before HTTP round
   trip success is claimed.
 
+**2026-08-07 successful hardware retest:**
+
+- Version `0.0.2-stage0` completed three separate HTTP round trips from the 3DS
+  at `10.0.0.144` to the Mac at `10.0.0.196:8080`.
+- The server received and returned `hi` (2 bytes),
+  `whats upppppp im msging from my 3ds` (35 bytes), and `hey` (3 bytes).
+- The user reported that the app displayed the responses correctly and was
+  working well.
+- Conclusion: repeated small text request/response over local Wi-Fi and response
+  rendering are proven on hardware. Explicit server-offline timeout and retry
+  behavior remain to be checked in Stage 0D.
+
 ---
 
 ## R-004 — Incremental text display
 
 **Question:** Can responses be appended and scrolled smoothly enough for agent output?
 
-**Status:** TODO
+**Status:** IMPLEMENTED / HOST BUILD PASSED / HARDWARE TODO
 
 Measure:
 - text wrapping;
@@ -154,6 +166,24 @@ Measure:
 - update frequency;
 - rendering cost;
 - Old vs New 3DS if possible.
+
+**2026-08-07 implementation record:**
+
+- Version `0.0.3-stage0` adds `POST /stream`, which sends a bounded fixture in 28
+  flushed pieces over roughly two seconds using ordinary HTTP with a known
+  `Content-Length`.
+- The 3DS client appends body bytes as they arrive and redraws after each receive,
+  while retaining a fixed 2 KiB response buffer.
+- Response display wraps at 48 bytes per line into at most 64 fixed lines. The
+  top screen shows 22 lines at once; D-pad or Circle Pad Up/Down navigates older
+  and newer lines.
+- The client validates the final `Content-Length`, reports an early disconnect,
+  retains any partial text, and exposes retry through `A` or `X`.
+- Host result: the 3DSX builds cleanly and the five development-server tests pass.
+- Host stream measurement: 1,424 response bytes delivered in 2.28 seconds across
+  28 flushed application chunks.
+- Update cadence, visual smoothness, wrapping, and scrolling still require the
+  physical hardware checklist.
 
 ---
 

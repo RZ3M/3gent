@@ -48,12 +48,15 @@ From the repository root:
 python3 -m unittest discover -s tools/dev-server -p 'test_*.py' -v
 ```
 
-The tests cover health, UTF-8 echo, unknown paths, and the 4 KiB request limit.
+The tests cover health, UTF-8 echo, the incremental stream fixture, unknown
+paths, and the 4 KiB request limit.
 
 ## Interface
 
 - `GET /health` returns a readiness string.
 - `POST /echo` accepts `text/plain` UTF-8 and returns a prefixed copy.
+- `POST /stream` returns a bounded multi-part fixture over roughly two seconds
+  so the 3DS can prove incremental rendering and scrollback.
 - Requests larger than 4 KiB are rejected.
 - Responses include `Content-Length` and close the connection so the Stage 0
   client can parse them simply and predictably.

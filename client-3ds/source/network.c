@@ -251,12 +251,24 @@ static bool read_http_response(
     char *response,
     size_t response_capacity,
     char *error,
-    size_t error_capacity
+    size_t error_capacity,
+    NetworkProgressCallback progress_callback,
+    void *progress_user_data
 )
 {
     char raw_response[HTTP_RESPONSE_CAPACITY + 1];
     size_t total = 0;
-    bool buffer_full = false;
+    size_t body_offset = 0;
+    size_t delivered_body_size = 0;
+    size_t expected_body_size = 0;
+    bool headers_parsed = false;
+    bool has_content_length = false;
+
+    if (response == NULL || response_capacity == 0) {
+        set_error(error, error_capacity, "response buffer is unavailable");
+        return false;
+    }
+    response[0] = '\0';
 
     while (total < HTTP_RESPONSE_CAPACITY) {
         if (!wait_for_socket(
@@ -288,71 +300,129 @@ static bool read_http_response(
         }
 
         total += (size_t)received;
+        raw_response[total] = '\0';
+
+        if (!headers_parsed) {
+            char *header_end = strstr(raw_response, "\r\n\r\n");
+            if (header_end == NULL) {
+                continue;
+            }
+
+            unsigned int status_code = 0;
+            if (sscanf(raw_response, "HTTP/%*u.%*u %u", &status_code) != 1) {
+                set_error(error, error_capacity, "invalid HTTP response");
+                return false;
+            }
+            if (status_code != 200) {
+                if (error != NULL && error_capacity > 0) {
+                    snprintf(
+                        error,
+                        error_capacity,
+                        "server returned HTTP %u",
+                        status_code
+                    );
+                }
+                return false;
+            }
+
+            char *content_length = strstr(raw_response, "\r\nContent-Length:");
+            if (content_length != NULL) {
+                unsigned long parsed_length = 0;
+                if (sscanf(
+                        content_length,
+                        "\r\nContent-Length: %lu",
+                        &parsed_length
+                    ) != 1) {
+                    set_error(error, error_capacity, "invalid Content-Length");
+                    return false;
+                }
+                if (parsed_length >= response_capacity) {
+                    set_error(
+                        error,
+                        error_capacity,
+                        "response exceeded the bounded buffer"
+                    );
+                    return false;
+                }
+                expected_body_size = (size_t)parsed_length;
+                has_content_length = true;
+            }
+
+            body_offset = (size_t)(header_end - raw_response) + 4;
+            headers_parsed = true;
+        }
+
+        if (headers_parsed) {
+            size_t available_body_size = total - body_offset;
+            if (available_body_size > delivered_body_size) {
+                size_t new_body_size = available_body_size - delivered_body_size;
+                if (delivered_body_size + new_body_size >= response_capacity) {
+                    set_error(
+                        error,
+                        error_capacity,
+                        "response exceeded the bounded buffer"
+                    );
+                    return false;
+                }
+
+                memcpy(
+                    response + delivered_body_size,
+                    raw_response + body_offset + delivered_body_size,
+                    new_body_size
+                );
+                delivered_body_size += new_body_size;
+                response[delivered_body_size] = '\0';
+
+                if (progress_callback != NULL) {
+                    progress_callback(response, progress_user_data);
+                }
+            }
+        }
     }
 
     if (total == HTTP_RESPONSE_CAPACITY) {
-        buffer_full = true;
-    }
-    raw_response[total] = '\0';
-
-    unsigned int status_code = 0;
-    if (sscanf(raw_response, "HTTP/%*u.%*u %u", &status_code) != 1) {
-        set_error(error, error_capacity, "invalid HTTP response");
+        set_error(error, error_capacity, "HTTP response exceeded the raw buffer");
         return false;
     }
-
-    char *body = strstr(raw_response, "\r\n\r\n");
-    if (body == NULL) {
+    if (!headers_parsed) {
         set_error(error, error_capacity, "HTTP response has no body separator");
         return false;
     }
-    body += 4;
 
-    if (status_code != 200) {
+    if (has_content_length && delivered_body_size != expected_body_size) {
         if (error != NULL && error_capacity > 0) {
-            snprintf(error, error_capacity, "server returned HTTP %u", status_code);
+            snprintf(
+                error,
+                error_capacity,
+                "response ended early (%u/%u bytes)",
+                (unsigned int)delivered_body_size,
+                (unsigned int)expected_body_size
+            );
         }
-        return false;
-    }
-
-    if (response == NULL || response_capacity == 0) {
-        set_error(error, error_capacity, "response buffer is unavailable");
-        return false;
-    }
-
-    size_t body_size = total - (size_t)(body - raw_response);
-    size_t copy_size = body_size;
-    if (copy_size >= response_capacity) {
-        copy_size = response_capacity - 1;
-        buffer_full = true;
-    }
-
-    memcpy(response, body, copy_size);
-    response[copy_size] = '\0';
-
-    if (buffer_full) {
-        set_error(error, error_capacity, "response exceeded the bounded buffer");
         return false;
     }
 
     return true;
 }
 
-bool network_echo(
+bool network_post_text(
     const char *host,
     unsigned short port,
+    const char *path,
     const char *message,
     char *response,
     size_t response_capacity,
     char *error,
-    size_t error_capacity
+    size_t error_capacity,
+    NetworkProgressCallback progress_callback,
+    void *progress_user_data
 )
 {
     if (!soc_ready) {
         set_error(error, error_capacity, "network service is not initialized");
         return false;
     }
-    if (host == NULL || message == NULL) {
+    if (host == NULL || path == NULL || path[0] != '/' || message == NULL) {
         set_error(error, error_capacity, "invalid network request");
         return false;
     }
@@ -391,7 +461,7 @@ bool network_echo(
         int request_size = snprintf(
             request,
             sizeof(request),
-            "POST /echo HTTP/1.1\r\n"
+            "POST %s HTTP/1.1\r\n"
             "Host: %s:%u\r\n"
             "User-Agent: 3gent/%s\r\n"
             "Content-Type: text/plain; charset=utf-8\r\n"
@@ -399,6 +469,7 @@ bool network_echo(
             "Connection: close\r\n"
             "\r\n"
             "%s",
+            path,
             host,
             (unsigned int)port,
             THREEGENT_APP_VERSION,
@@ -426,7 +497,9 @@ bool network_echo(
                 response,
                 response_capacity,
                 error,
-                error_capacity
+                error_capacity,
+                progress_callback,
+                progress_user_data
             )) {
             break;
         }

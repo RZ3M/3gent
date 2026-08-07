@@ -4,17 +4,22 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+typedef void (*NetworkProgressCallback)(const char *response, void *user_data);
+
 bool network_start(char *error, size_t error_capacity);
 void network_stop(void);
 
-bool network_echo(
+bool network_post_text(
     const char *host,
     unsigned short port,
+    const char *path,
     const char *message,
     char *response,
     size_t response_capacity,
     char *error,
-    size_t error_capacity
+    size_t error_capacity,
+    NetworkProgressCallback progress_callback,
+    void *progress_user_data
 );
 
 #endif

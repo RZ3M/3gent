@@ -23,19 +23,21 @@ After that works, add microphone capture and the real desktop bridge.
 
 ## Stage 0 implementation status
 
-The Stage 0A-C implementation now lives in `client-3ds/` and
+The Stage 0A-D implementation now lives in `client-3ds/` and
 `tools/dev-server/`. It includes:
 
 - a minimal top/bottom-screen 3DS application;
 - native software keyboard input;
 - a bounded, timeout-controlled local HTTP request;
 - visible connecting, success, cancellation, and error states;
+- incremental response rendering with bounded scrollback and D-pad navigation;
 - a standard-library development echo server with automated tests.
 
-The development server tests pass on the host. The 3DS application builds with
+The keyboard and LAN echo loop have passed on physical 3DS hardware. The
+development server tests pass on the host, the 3DS application builds with
 devkitARM r68 and libctru 2.7.0, and the same build passes in CI using devkitPro's
-official toolchain container. Physical-hardware verification is still required
-before the related feasibility questions can be marked proven.
+official toolchain container. Incremental rendering still requires its hardware
+check before Stage 0D is considered proven.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical test checklist. See [`tools/dev-server/README.md`](tools/dev-server/README.md)

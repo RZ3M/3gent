@@ -7,10 +7,14 @@ import unittest
 from server import DevelopmentServer, EchoHandler, MAX_REQUEST_BYTES
 
 
+class FastEchoHandler(EchoHandler):
+    stream_delay_seconds = 0
+
+
 class EchoServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.server = DevelopmentServer(("127.0.0.1", 0), EchoHandler)
+        cls.server = DevelopmentServer(("127.0.0.1", 0), FastEchoHandler)
         cls.port = cls.server.server_address[1]
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
@@ -54,6 +58,13 @@ class EchoServerTests(unittest.TestCase):
     def test_rejects_oversized_body(self) -> None:
         status, _ = self.request("POST", "/echo", b"x" * (MAX_REQUEST_BYTES + 1))
         self.assertEqual(status, 413)
+
+    def test_stream_returns_long_incremental_fixture(self) -> None:
+        status, body = self.request("POST", "/stream", b"stream test")
+        self.assertEqual(status, 200)
+        self.assertIn(b"3gent incremental output test", body)
+        self.assertIn(b"Chunk 24", body)
+        self.assertIn(b"Stream complete", body)
 
 
 if __name__ == "__main__":

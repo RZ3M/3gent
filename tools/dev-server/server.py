@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -13,7 +14,8 @@ RESPONSE_PREFIX = "hello from 3gent dev server: "
 
 
 class EchoHandler(BaseHTTPRequestHandler):
-    server_version = "3gent-stage0/0.0.2"
+    server_version = "3gent-stage0/0.0.3"
+    stream_delay_seconds = 0.08
 
     def _send_text(self, status: HTTPStatus, text: str) -> None:
         body = text.encode("utf-8")
@@ -25,6 +27,64 @@ class EchoHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
         self.close_connection = True
 
+    def _read_message(self) -> str | None:
+        raw_length = self.headers.get("Content-Length")
+        if raw_length is None:
+            self._send_text(HTTPStatus.LENGTH_REQUIRED, "Content-Length required")
+            return None
+
+        try:
+            content_length = int(raw_length)
+        except ValueError:
+            self._send_text(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
+            return None
+
+        if content_length < 0 or content_length > MAX_REQUEST_BYTES:
+            self._send_text(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                f"request must be at most {MAX_REQUEST_BYTES} bytes",
+            )
+            return None
+
+        body = self.rfile.read(content_length)
+        if len(body) != content_length:
+            self._send_text(HTTPStatus.BAD_REQUEST, "incomplete request body")
+            return None
+
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError:
+            self._send_text(HTTPStatus.BAD_REQUEST, "request body must be UTF-8")
+            return None
+
+    def _send_stream(self, message: str) -> None:
+        chunks = [
+            "3gent incremental output test\n",
+            f"Prompt received: {message[:80]}\n",
+            "The server is sending this response in small pieces.\n",
+        ]
+        chunks.extend(
+            f"Chunk {index:02d}: incremental agent output reached the 3DS.\n"
+            for index in range(1, 25)
+        )
+        chunks.append("Stream complete. Use UP/DOWN to inspect scrollback.\n")
+        encoded_chunks = [chunk.encode("utf-8") for chunk in chunks]
+
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header(
+            "Content-Length",
+            str(sum(len(chunk) for chunk in encoded_chunks)),
+        )
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        for chunk in encoded_chunks:
+            self.wfile.write(chunk)
+            self.wfile.flush()
+            time.sleep(self.stream_delay_seconds)
+        self.close_connection = True
+
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
         if self.path != "/health":
             self._send_text(HTTPStatus.NOT_FOUND, "not found")
@@ -33,46 +93,25 @@ class EchoHandler(BaseHTTPRequestHandler):
         self._send_text(HTTPStatus.OK, "3gent Stage 0 server is ready")
 
     def do_POST(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
-        if self.path != "/echo":
+        if self.path not in {"/echo", "/stream"}:
             self._send_text(HTTPStatus.NOT_FOUND, "not found")
             return
 
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None:
-            self._send_text(HTTPStatus.LENGTH_REQUIRED, "Content-Length required")
+        message = self._read_message()
+        if message is None:
             return
 
-        try:
-            content_length = int(raw_length)
-        except ValueError:
-            self._send_text(HTTPStatus.BAD_REQUEST, "invalid Content-Length")
-            return
-
-        if content_length < 0 or content_length > MAX_REQUEST_BYTES:
-            self._send_text(
-                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
-                f"request must be at most {MAX_REQUEST_BYTES} bytes",
-            )
-            return
-
-        body = self.rfile.read(content_length)
-        if len(body) != content_length:
-            self._send_text(HTTPStatus.BAD_REQUEST, "incomplete request body")
-            return
-
-        try:
-            message = body.decode("utf-8")
-        except UnicodeDecodeError:
-            self._send_text(HTTPStatus.BAD_REQUEST, "request body must be UTF-8")
-            return
-
+        encoded_message = message.encode("utf-8")
         preview = message.replace("\r", "\\r").replace("\n", "\\n")[:80]
         print(
-            f"echo from {self.client_address[0]}: "
-            f"{len(body)} bytes, preview={preview!r}",
+            f"{self.path.removeprefix('/')} from {self.client_address[0]}: "
+            f"{len(encoded_message)} bytes, preview={preview!r}",
             flush=True,
         )
-        self._send_text(HTTPStatus.OK, RESPONSE_PREFIX + message)
+        if self.path == "/stream":
+            self._send_stream(message)
+        else:
+            self._send_text(HTTPStatus.OK, RESPONSE_PREFIX + message)
 
 
 class DevelopmentServer(ThreadingHTTPServer):
