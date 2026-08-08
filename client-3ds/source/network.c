@@ -29,6 +29,15 @@
 #define NETWORK_HOST_CAPACITY 64
 #define AUDIO_CHUNK_CAPACITY 8192
 #define AUDIO_OUTPUT_CAPACITY (AUDIO_CHUNK_CAPACITY + 32)
+#define PUSH_FRAME_CAPACITY 4096
+#define PUSH_HOST_CAPACITY 64
+#define PUSH_SESSION_ID_CAPACITY 65
+#define PUSH_COMMAND_ID_CAPACITY 64
+#define PUSH_HEARTBEAT_IDLE_MS 3000U
+#define PUSH_HEARTBEAT_TIMEOUT_MS 8000U
+#define PUSH_STABLE_CONNECTION_MS 10000U
+#define PUSH_RECONNECT_INITIAL_MS 250U
+#define PUSH_RECONNECT_MAX_MS 10000U
 
 typedef void (*NetworkProgressCallback)(
     const char *response,
@@ -111,14 +120,55 @@ typedef struct {
     u64 deadline_ms;
 } AudioTransaction;
 
+typedef enum {
+    PUSH_PHASE_STOPPED = 0,
+    PUSH_PHASE_WAITING,
+    PUSH_PHASE_CONNECTING,
+    PUSH_PHASE_SENDING_HELLO,
+    PUSH_PHASE_WAITING_READY,
+    PUSH_PHASE_READY,
+} PushPhase;
+
+typedef struct {
+    PushPhase phase;
+    char host[PUSH_HOST_CAPACITY];
+    unsigned short port;
+    char session_id[PUSH_SESSION_ID_CAPACITY];
+    unsigned int cursor;
+    char output[PUSH_FRAME_CAPACITY + 1];
+    size_t output_size;
+    size_t output_offset;
+    char input[PUSH_FRAME_CAPACITY + 1];
+    size_t input_size;
+    char frame[PUSH_FRAME_CAPACITY + 1];
+    bool frame_ready;
+    char command[PUSH_FRAME_CAPACITY + 1];
+    size_t command_size;
+    char command_id[PUSH_COMMAND_ID_CAPACITY + 1];
+    bool command_pending;
+    bool command_sent_on_connection;
+    bool ping_outstanding;
+    unsigned int ping_nonce;
+    u64 connect_deadline_ms;
+    u64 reconnect_at_ms;
+    u64 last_receive_ms;
+    u64 connected_at_ms;
+    unsigned int reconnect_delay_ms;
+    char error[NETWORK_ERROR_CAPACITY];
+} PushConnection;
+
 static u32 *soc_buffer = NULL;
 static bool soc_ready = false;
 static int control_socket = -1;
 static int prepared_audio_socket = -1;
 static int audio_stream_socket = -1;
+static int push_socket = -1;
 static u32 next_command_id = 1;
 static ControlTransaction control_transaction;
 static AudioTransaction audio_transaction;
+static PushConnection push_connection;
+
+static void pump_push(void);
 
 static void make_command_id(char *command_id, size_t capacity)
 {
@@ -204,6 +254,7 @@ bool network_start(char *error, size_t error_capacity)
 
 void network_stop(void)
 {
+    network_push_stop();
     network_control_cancel();
     network_audio_stream_abort();
     close_socket(&prepared_audio_socket);
@@ -695,16 +746,6 @@ bool network_prepare_connections(
     close_socket(&control_socket);
     close_socket(&prepared_audio_socket);
 
-    int new_control_socket = open_server_socket(
-        host,
-        port,
-        error,
-        error_capacity
-    );
-    if (new_control_socket < 0) {
-        return false;
-    }
-
     int new_audio_socket = open_server_socket(
         host,
         port,
@@ -712,31 +753,21 @@ bool network_prepare_connections(
         error_capacity
     );
     if (new_audio_socket < 0) {
-        close(new_control_socket);
         return false;
     }
 
-    bool control_ready = verify_persistent_connection(
-        new_control_socket,
-        host,
-        port,
-        error,
-        error_capacity
-    );
-    bool audio_ready = control_ready && verify_persistent_connection(
+    bool audio_ready = verify_persistent_connection(
         new_audio_socket,
         host,
         port,
         error,
         error_capacity
     );
-    if (!control_ready || !audio_ready) {
+    if (!audio_ready) {
         close(new_audio_socket);
-        close(new_control_socket);
         return false;
     }
 
-    control_socket = new_control_socket;
     prepared_audio_socket = new_audio_socket;
     return true;
 }
@@ -887,6 +918,590 @@ static AsyncStepResult send_bytes_step(
     }
     set_errno_error(error, error_capacity, "send", errno);
     return ASYNC_STEP_FAILED;
+}
+
+static bool push_json_escape(
+    const char *source,
+    char *destination,
+    size_t destination_capacity
+)
+{
+    if (source == NULL || destination == NULL || destination_capacity == 0) {
+        return false;
+    }
+
+    size_t written = 0;
+    for (const unsigned char *cursor = (const unsigned char *)source;
+         *cursor != '\0'; cursor++) {
+        const char *escape = NULL;
+        char unicode_escape[7];
+        if (*cursor == '"') {
+            escape = "\\\"";
+        } else if (*cursor == '\\') {
+            escape = "\\\\";
+        } else if (*cursor == '\b') {
+            escape = "\\b";
+        } else if (*cursor == '\f') {
+            escape = "\\f";
+        } else if (*cursor == '\n') {
+            escape = "\\n";
+        } else if (*cursor == '\r') {
+            escape = "\\r";
+        } else if (*cursor == '\t') {
+            escape = "\\t";
+        } else if (*cursor < 0x20U) {
+            snprintf(unicode_escape, sizeof(unicode_escape), "\\u%04x", *cursor);
+            escape = unicode_escape;
+        }
+
+        if (escape != NULL) {
+            size_t escape_size = strlen(escape);
+            if (written + escape_size >= destination_capacity) {
+                return false;
+            }
+            memcpy(destination + written, escape, escape_size);
+            written += escape_size;
+        } else {
+            if (written + 1 >= destination_capacity) {
+                return false;
+            }
+            destination[written++] = (char)*cursor;
+        }
+    }
+    destination[written] = '\0';
+    return true;
+}
+
+static unsigned int push_jittered_delay(unsigned int base_delay_ms)
+{
+    unsigned int lower = (base_delay_ms * 80U) / 100U;
+    unsigned int range = (base_delay_ms * 40U) / 100U + 1U;
+    return lower + (unsigned int)(osGetTime() % range);
+}
+
+static void push_schedule_reconnect(const char *message)
+{
+    char saved_message[NETWORK_ERROR_CAPACITY];
+    saved_message[0] = '\0';
+    if (message != NULL) {
+        snprintf(saved_message, sizeof(saved_message), "%s", message);
+    }
+    close_socket(&push_socket);
+    push_connection.output_size = 0;
+    push_connection.output_offset = 0;
+    push_connection.input_size = 0;
+    push_connection.command_sent_on_connection = false;
+    push_connection.ping_outstanding = false;
+    push_connection.connect_deadline_ms = 0;
+    push_connection.connected_at_ms = 0;
+    if (saved_message[0] != '\0') {
+        set_error(
+            push_connection.error,
+            sizeof(push_connection.error),
+            saved_message
+        );
+    }
+
+    unsigned int base_delay = push_connection.reconnect_delay_ms;
+    if (base_delay < PUSH_RECONNECT_INITIAL_MS) {
+        base_delay = PUSH_RECONNECT_INITIAL_MS;
+    }
+    push_connection.reconnect_at_ms = osGetTime()
+        + push_jittered_delay(base_delay);
+    if (base_delay < PUSH_RECONNECT_MAX_MS) {
+        unsigned int next_delay = base_delay * 2U;
+        push_connection.reconnect_delay_ms = next_delay > PUSH_RECONNECT_MAX_MS
+            ? PUSH_RECONNECT_MAX_MS
+            : next_delay;
+    }
+    push_connection.phase = PUSH_PHASE_WAITING;
+}
+
+static bool push_set_output(const char *frame)
+{
+    size_t size = strlen(frame);
+    if (size == 0 || size > PUSH_FRAME_CAPACITY) {
+        set_error(
+            push_connection.error,
+            sizeof(push_connection.error),
+            "push output frame exceeded its buffer"
+        );
+        return false;
+    }
+    memcpy(push_connection.output, frame, size);
+    push_connection.output[size] = '\0';
+    push_connection.output_size = size;
+    push_connection.output_offset = 0;
+    return true;
+}
+
+static bool push_build_hello(void)
+{
+    int size = snprintf(
+        push_connection.output,
+        sizeof(push_connection.output),
+        "{\"protocolVersion\":%u,\"type\":\"connection.hello\","
+        "\"sessionId\":\"%s\",\"after\":%u}\n",
+        THREEGENT_PROTOCOL_VERSION,
+        push_connection.session_id,
+        push_connection.cursor
+    );
+    if (size < 0 || (size_t)size >= sizeof(push_connection.output)) {
+        set_error(
+            push_connection.error,
+            sizeof(push_connection.error),
+            "push hello exceeded its buffer"
+        );
+        return false;
+    }
+    push_connection.output_size = (size_t)size;
+    push_connection.output_offset = 0;
+    return true;
+}
+
+static bool push_extract_frame(void)
+{
+    if (push_connection.frame_ready) {
+        return true;
+    }
+    char *newline = NULL;
+    size_t line_size = 0;
+    do {
+        newline = memchr(
+            push_connection.input,
+            '\n',
+            push_connection.input_size
+        );
+        if (newline == NULL) {
+            return false;
+        }
+        line_size = (size_t)(newline - push_connection.input);
+        if (line_size == 0) {
+            size_t remaining = push_connection.input_size - 1;
+            memmove(push_connection.input, push_connection.input + 1, remaining);
+            push_connection.input_size = remaining;
+            push_connection.input[remaining] = '\0';
+        }
+    } while (line_size == 0);
+    memcpy(push_connection.frame, push_connection.input, line_size);
+    push_connection.frame[line_size] = '\0';
+    size_t consumed = line_size + 1;
+    size_t remaining = push_connection.input_size - consumed;
+    memmove(
+        push_connection.input,
+        push_connection.input + consumed,
+        remaining
+    );
+    push_connection.input_size = remaining;
+    push_connection.input[remaining] = '\0';
+    push_connection.frame_ready = true;
+    push_connection.last_receive_ms = osGetTime();
+    push_connection.ping_outstanding = false;
+
+    if (strstr(push_connection.frame, "\"type\":\"connection.ready\"") != NULL) {
+        push_connection.phase = PUSH_PHASE_READY;
+        push_connection.connected_at_ms = push_connection.last_receive_ms;
+        push_connection.error[0] = '\0';
+    } else if (strstr(push_connection.frame, "\"type\":\"error\"") != NULL
+        && push_connection.phase == PUSH_PHASE_READY
+        && push_connection.command_sent_on_connection) {
+        push_connection.command_pending = false;
+        push_connection.command_sent_on_connection = false;
+        push_connection.command_size = 0;
+        push_connection.command_id[0] = '\0';
+    }
+    return true;
+}
+
+static bool push_queue_command(
+    const char *command_json,
+    const char *command_id,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (push_connection.phase == PUSH_PHASE_STOPPED) {
+        set_error(error, error_capacity, "push link is not started");
+        return false;
+    }
+    if (push_connection.command_pending) {
+        set_error(error, error_capacity, "another push command is awaiting acknowledgement");
+        return false;
+    }
+    size_t size = strlen(command_json);
+    if (size == 0 || size > PUSH_FRAME_CAPACITY) {
+        set_error(error, error_capacity, "push command exceeded its buffer");
+        return false;
+    }
+    memcpy(push_connection.command, command_json, size + 1);
+    push_connection.command_size = size;
+    snprintf(
+        push_connection.command_id,
+        sizeof(push_connection.command_id),
+        "%s",
+        command_id
+    );
+    push_connection.command_pending = true;
+    push_connection.command_sent_on_connection = false;
+    return true;
+}
+
+bool network_push_start(
+    const char *host,
+    unsigned short port,
+    const char *session_id,
+    unsigned int after,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (!soc_ready) {
+        set_error(error, error_capacity, "network service is not initialized");
+        return false;
+    }
+    if (host == NULL || strlen(host) >= PUSH_HOST_CAPACITY
+        || session_id == NULL || strlen(session_id) >= PUSH_SESSION_ID_CAPACITY) {
+        set_error(error, error_capacity, "invalid push endpoint or session");
+        return false;
+    }
+
+    network_push_stop();
+    memset(&push_connection, 0, sizeof(push_connection));
+    snprintf(push_connection.host, sizeof(push_connection.host), "%s", host);
+    snprintf(
+        push_connection.session_id,
+        sizeof(push_connection.session_id),
+        "%s",
+        session_id
+    );
+    push_connection.port = port;
+    push_connection.cursor = after;
+    push_connection.phase = PUSH_PHASE_WAITING;
+    push_connection.reconnect_delay_ms = PUSH_RECONNECT_INITIAL_MS;
+    push_connection.reconnect_at_ms = osGetTime();
+    return true;
+}
+
+bool network_push_is_ready(void)
+{
+    return push_connection.phase == PUSH_PHASE_READY;
+}
+
+const char *network_push_state(void)
+{
+    switch (push_connection.phase) {
+        case PUSH_PHASE_STOPPED:
+            return "off";
+        case PUSH_PHASE_WAITING:
+            return "retrying";
+        case PUSH_PHASE_CONNECTING:
+            return "connecting";
+        case PUSH_PHASE_SENDING_HELLO:
+        case PUSH_PHASE_WAITING_READY:
+            return "syncing";
+        case PUSH_PHASE_READY:
+            return "ready";
+    }
+    return "unknown";
+}
+
+const char *network_push_error(void)
+{
+    return push_connection.error;
+}
+
+bool network_push_has_frame(void)
+{
+    return push_connection.frame_ready;
+}
+
+const char *network_push_frame(void)
+{
+    return push_connection.frame;
+}
+
+void network_push_consume_frame(void)
+{
+    push_connection.frame_ready = false;
+    push_connection.frame[0] = '\0';
+}
+
+void network_push_set_cursor(unsigned int cursor)
+{
+    push_connection.cursor = cursor;
+}
+
+bool network_push_send_text(
+    const char *text,
+    char *error,
+    size_t error_capacity
+)
+{
+    char escaped[PUSH_FRAME_CAPACITY];
+    if (!push_json_escape(text, escaped, sizeof(escaped))) {
+        set_error(error, error_capacity, "text could not fit in a push frame");
+        return false;
+    }
+    char command_id[PUSH_COMMAND_ID_CAPACITY + 1];
+    make_command_id(command_id, sizeof(command_id));
+    char frame[PUSH_FRAME_CAPACITY + 1];
+    int size = snprintf(
+        frame,
+        sizeof(frame),
+        "{\"protocolVersion\":%u,\"type\":\"command\","
+        "\"commandId\":\"%s\",\"command\":{"
+        "\"type\":\"capture.text\",\"text\":\"%s\"}}\n",
+        THREEGENT_PROTOCOL_VERSION,
+        command_id,
+        escaped
+    );
+    if (size < 0 || (size_t)size >= sizeof(frame)) {
+        set_error(error, error_capacity, "text command exceeded its buffer");
+        return false;
+    }
+    return push_queue_command(frame, command_id, error, error_capacity);
+}
+
+bool network_push_send_interrupt(char *error, size_t error_capacity)
+{
+    char command_id[PUSH_COMMAND_ID_CAPACITY + 1];
+    make_command_id(command_id, sizeof(command_id));
+    char frame[384];
+    int size = snprintf(
+        frame,
+        sizeof(frame),
+        "{\"protocolVersion\":%u,\"type\":\"command\","
+        "\"commandId\":\"%s\",\"command\":{"
+        "\"type\":\"turn.interrupt\"}}\n",
+        THREEGENT_PROTOCOL_VERSION,
+        command_id
+    );
+    if (size < 0 || (size_t)size >= sizeof(frame)) {
+        set_error(error, error_capacity, "interrupt command exceeded its buffer");
+        return false;
+    }
+    return push_queue_command(frame, command_id, error, error_capacity);
+}
+
+bool network_push_send_approval(
+    const char *approval_id,
+    const char *choice,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (approval_id == NULL || strlen(approval_id) > 64
+        || choice == NULL || strlen(choice) > 24) {
+        set_error(error, error_capacity, "invalid approval response");
+        return false;
+    }
+    char command_id[PUSH_COMMAND_ID_CAPACITY + 1];
+    make_command_id(command_id, sizeof(command_id));
+    char frame[512];
+    int size = snprintf(
+        frame,
+        sizeof(frame),
+        "{\"protocolVersion\":%u,\"type\":\"command\","
+        "\"commandId\":\"%s\",\"command\":{"
+        "\"type\":\"approval.respond\",\"approvalId\":\"%s\","
+        "\"choice\":\"%s\"}}\n",
+        THREEGENT_PROTOCOL_VERSION,
+        command_id,
+        approval_id,
+        choice
+    );
+    if (size < 0 || (size_t)size >= sizeof(frame)) {
+        set_error(error, error_capacity, "approval command exceeded its buffer");
+        return false;
+    }
+    return push_queue_command(frame, command_id, error, error_capacity);
+}
+
+bool network_push_acknowledge(const char *command_id)
+{
+    if (command_id != NULL && push_connection.command_pending
+        && strcmp(command_id, push_connection.command_id) == 0) {
+        push_connection.command_pending = false;
+        push_connection.command_sent_on_connection = false;
+        push_connection.command_size = 0;
+        push_connection.command_id[0] = '\0';
+        return true;
+    }
+    return false;
+}
+
+void network_push_stop(void)
+{
+    close_socket(&push_socket);
+    memset(&push_connection, 0, sizeof(push_connection));
+}
+
+static void pump_push_receive(void)
+{
+    if (push_connection.frame_ready || push_extract_frame()) {
+        return;
+    }
+    if (push_connection.input_size >= PUSH_FRAME_CAPACITY) {
+        push_schedule_reconnect("push input frame exceeded 4 KiB");
+        return;
+    }
+    ssize_t received = recv(
+        push_socket,
+        push_connection.input + push_connection.input_size,
+        PUSH_FRAME_CAPACITY - push_connection.input_size,
+        0
+    );
+    if (received > 0) {
+        push_connection.input_size += (size_t)received;
+        push_connection.input[push_connection.input_size] = '\0';
+        push_extract_frame();
+        return;
+    }
+    if (received == 0) {
+        push_schedule_reconnect("push connection closed");
+        return;
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        set_errno_error(
+            push_connection.error,
+            sizeof(push_connection.error),
+            "push receive",
+            errno
+        );
+        push_schedule_reconnect(push_connection.error);
+    }
+}
+
+static void pump_push(void)
+{
+    if (push_connection.phase == PUSH_PHASE_STOPPED) {
+        return;
+    }
+    const u64 now_ms = osGetTime();
+    if (push_connection.phase == PUSH_PHASE_WAITING) {
+        if (now_ms < push_connection.reconnect_at_ms) {
+            return;
+        }
+        AsyncConnectResult result = start_async_server_socket(
+            push_connection.host,
+            push_connection.port,
+            &push_socket,
+            push_connection.error,
+            sizeof(push_connection.error)
+        );
+        if (result == ASYNC_CONNECT_FAILED) {
+            push_schedule_reconnect(push_connection.error);
+            return;
+        }
+        push_connection.connect_deadline_ms = new_network_deadline();
+        push_connection.phase = result == ASYNC_CONNECT_COMPLETE
+            ? PUSH_PHASE_SENDING_HELLO
+            : PUSH_PHASE_CONNECTING;
+        if (result == ASYNC_CONNECT_COMPLETE && !push_build_hello()) {
+            push_schedule_reconnect(push_connection.error);
+        }
+        return;
+    }
+
+    if (push_connection.phase == PUSH_PHASE_CONNECTING) {
+        if (deadline_expired(push_connection.connect_deadline_ms)) {
+            push_schedule_reconnect("push connect timed out");
+            return;
+        }
+        int ready = socket_ready_now(
+            push_socket,
+            true,
+            push_connection.error,
+            sizeof(push_connection.error)
+        );
+        if (ready < 0) {
+            push_schedule_reconnect(push_connection.error);
+            return;
+        }
+        if (ready == 0) {
+            return;
+        }
+        push_connection.phase = PUSH_PHASE_SENDING_HELLO;
+        if (!push_build_hello()) {
+            push_schedule_reconnect(push_connection.error);
+        }
+        return;
+    }
+
+    if (push_connection.output_offset < push_connection.output_size) {
+        AsyncStepResult step = send_bytes_step(
+            push_socket,
+            push_connection.output,
+            push_connection.output_size,
+            &push_connection.output_offset,
+            push_connection.error,
+            sizeof(push_connection.error)
+        );
+        if (step == ASYNC_STEP_FAILED) {
+            push_schedule_reconnect(push_connection.error);
+            return;
+        }
+        if (step != ASYNC_STEP_COMPLETE) {
+            return;
+        }
+        push_connection.output_size = 0;
+        push_connection.output_offset = 0;
+        if (push_connection.phase == PUSH_PHASE_SENDING_HELLO) {
+            push_connection.phase = PUSH_PHASE_WAITING_READY;
+            push_connection.last_receive_ms = now_ms;
+        } else if (push_connection.command_pending) {
+            push_connection.command_sent_on_connection = true;
+        }
+    }
+
+    if (push_connection.phase == PUSH_PHASE_WAITING_READY) {
+        if (deadline_expired(push_connection.connect_deadline_ms)) {
+            push_schedule_reconnect("push hello timed out");
+            return;
+        }
+        pump_push_receive();
+        return;
+    }
+    if (push_connection.phase != PUSH_PHASE_READY) {
+        return;
+    }
+
+    if (push_connection.connected_at_ms != 0
+        && now_ms - push_connection.connected_at_ms >= PUSH_STABLE_CONNECTION_MS) {
+        push_connection.reconnect_delay_ms = PUSH_RECONNECT_INITIAL_MS;
+    }
+    if (now_ms - push_connection.last_receive_ms >= PUSH_HEARTBEAT_TIMEOUT_MS) {
+        push_schedule_reconnect("push heartbeat timed out");
+        return;
+    }
+    if (push_connection.output_size == 0
+        && push_connection.command_pending
+        && !push_connection.command_sent_on_connection) {
+        if (!push_set_output(push_connection.command)) {
+            push_schedule_reconnect(push_connection.error);
+            return;
+        }
+    } else if (push_connection.output_size == 0
+        && !push_connection.ping_outstanding
+        && now_ms - push_connection.last_receive_ms >= PUSH_HEARTBEAT_IDLE_MS) {
+        push_connection.ping_nonce++;
+        char ping[128];
+        int size = snprintf(
+            ping,
+            sizeof(ping),
+            "{\"protocolVersion\":%u,\"type\":\"ping\",\"nonce\":%u}\n",
+            THREEGENT_PROTOCOL_VERSION,
+            push_connection.ping_nonce
+        );
+        if (size < 0 || (size_t)size >= sizeof(ping)
+            || !push_set_output(ping)) {
+            push_schedule_reconnect("push ping exceeded its buffer");
+            return;
+        }
+        push_connection.ping_outstanding = true;
+    }
+
+    pump_push_receive();
 }
 
 static AsyncStepResult receive_http_step(
@@ -1701,6 +2316,7 @@ void network_audio_stream_abort(void)
 
 void network_pump(void)
 {
+    pump_push();
     pump_control();
     pump_audio();
 }

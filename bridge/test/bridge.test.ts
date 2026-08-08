@@ -11,7 +11,6 @@ import { EventStore } from "../src/event-store.js";
 import { FAKE_SESSION_ID } from "../src/fake-agent.js";
 import {
   COMMAND_ID_HEADER,
-  encodeEventBatch,
   type EventEnvelope,
   PROTOCOL_HEADER,
   PROTOCOL_VERSION,
@@ -373,11 +372,10 @@ test("rejects a cursor ahead of a restarted event stream", () => {
 
 test("rejects an event line that exceeds the protocol bound", () => {
   const events = new EventStore();
-  const event = events.append(FAKE_SESSION_ID, "error", {
-    message: "x".repeat(1_000),
-  });
   assert.throws(
-    () => encodeEventBatch([event]),
+    () => events.append(FAKE_SESSION_ID, "error", {
+      message: "x".repeat(1_000),
+    }),
     (error: unknown) => error instanceof Error
       && "code" in error
       && error.code === "EVENT_TOO_LARGE",

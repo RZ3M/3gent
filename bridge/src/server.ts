@@ -35,6 +35,11 @@ interface BridgeServerOptions {
   verbosePolls?: boolean;
 }
 
+export interface CommandExecution {
+  acknowledgement: CommandAcknowledgement;
+  duplicate: boolean;
+}
+
 export class BridgeApplication {
   public readonly events = new EventStore();
   public readonly fakeAgent: FakeAgent;
@@ -71,7 +76,7 @@ export class BridgeApplication {
         this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
           status: "ready",
-          bridge: "3gent-stage1",
+          bridge: "3gent-stage1.5",
         });
         return;
       }
@@ -121,12 +126,14 @@ export class BridgeApplication {
       if (interruptMatch !== null && request.method === "POST") {
         this.#requireFakeSession(interruptMatch[1]);
         await drainBody(request, 0);
-        const duplicate = this.#runCommand(
-          request,
-          response,
-          () => this.fakeAgent.interrupt(),
+        const execution = this.interruptCommand(
+          FAKE_SESSION_ID,
+          requireCommandId(request.headers),
         );
-        this.#logger(`interrupt ${duplicate ? "replayed" : "accepted"}`);
+        this.#sendAcknowledgement(response, execution);
+        this.#logger(
+          `interrupt ${execution.duplicate ? "replayed" : "accepted"}`,
+        );
         return;
       }
 
@@ -163,6 +170,55 @@ export class BridgeApplication {
 
   public shutdown(): void {
     this.fakeAgent.shutdown();
+  }
+
+  public session(sessionId: string): ReturnType<FakeAgent["session"]> {
+    this.#requireFakeSession(sessionId);
+    return this.fakeAgent.session();
+  }
+
+  public eventsAfter(sessionId: string, after: number, limit: number) {
+    this.#requireFakeSession(sessionId);
+    return this.events.after(sessionId, after, limit);
+  }
+
+  public submitTextCommand(
+    sessionId: string,
+    commandId: string,
+    text: string,
+  ): CommandExecution {
+    this.#requireFakeSession(sessionId);
+    if (Buffer.byteLength(text, "utf8") > MAX_TEXT_CAPTURE_BYTES) {
+      throw new ProtocolError(413, "BODY_TOO_LARGE", "text capture exceeds its limit");
+    }
+    if (text.trim().length === 0) {
+      throw new ProtocolError(400, "EMPTY_TEXT_CAPTURE", "text capture is empty");
+    }
+    return this.#executeCommand(commandId, () => this.fakeAgent.submitText(text));
+  }
+
+  public interruptCommand(
+    sessionId: string,
+    commandId: string,
+  ): CommandExecution {
+    this.#requireFakeSession(sessionId);
+    return this.#executeCommand(commandId, () => this.fakeAgent.interrupt());
+  }
+
+  public approvalCommand(
+    sessionId: string,
+    commandId: string,
+    approvalId: string,
+    choice: "approve_once" | "decline" | "cancel",
+  ): CommandExecution {
+    this.#requireFakeSession(sessionId);
+    if (!isIdentifier(approvalId, "apr")) {
+      throw new ProtocolError(400, "INVALID_APPROVAL_ID", "invalid approval ID");
+    }
+    return this.#executeCommand(
+      commandId,
+      () => this.fakeAgent.respondToApproval(approvalId, choice),
+    );
   }
 
   #sendEvents(
@@ -205,16 +261,14 @@ export class BridgeApplication {
     const body = await drainBody(request, MAX_TEXT_CAPTURE_BYTES);
     const text = body.toString("utf8");
     this.#verboseLog(`3DS -> bridge text ${JSON.stringify(text)}`);
-    if (text.trim().length === 0) {
-      throw new ProtocolError(400, "EMPTY_TEXT_CAPTURE", "text capture is empty");
-    }
-    const duplicate = this.#runCommand(
-      request,
-      response,
-      () => this.fakeAgent.submitText(text),
+    const execution = this.submitTextCommand(
+      FAKE_SESSION_ID,
+      requireCommandId(request.headers),
+      text,
     );
+    this.#sendAcknowledgement(response, execution);
     this.#logger(
-      `text capture ${duplicate ? "replayed" : "accepted"}: ${body.byteLength} bytes`,
+      `text capture ${execution.duplicate ? "replayed" : "accepted"}: ${body.byteLength} bytes`,
     );
   }
 
@@ -307,30 +361,51 @@ export class BridgeApplication {
     if (choice !== "approve_once" && choice !== "decline" && choice !== "cancel") {
       throw new ProtocolError(400, "INVALID_APPROVAL_CHOICE", "approval choice is not allowed");
     }
-    const duplicate = this.#runCommand(
-      request,
-      response,
-      () => this.fakeAgent.respondToApproval(approvalId, choice),
+    const execution = this.approvalCommand(
+      FAKE_SESSION_ID,
+      requireCommandId(request.headers),
+      approvalId,
+      choice,
     );
+    this.#sendAcknowledgement(response, execution);
     this.#logger(
-      `approval ${choice} ${duplicate ? "replayed" : "accepted"}`,
+      `approval ${choice} ${execution.duplicate ? "replayed" : "accepted"}`,
     );
   }
 
-  #runCommand(
-    request: IncomingMessage,
-    response: ServerResponse,
+  #executeCommand(
+    commandId: string,
     action: () => void,
-  ): boolean {
-    const commandId = requireCommandId(request.headers);
+  ): CommandExecution {
+    if (!isIdentifier(commandId, "cmd")) {
+      throw new ProtocolError(400, "INVALID_COMMAND_ID", "invalid command ID");
+    }
     const duplicate = this.#commands.get(commandId);
     if (duplicate !== undefined) {
-      this.#sendJson(response, 200, duplicate);
-      return true;
+      return {acknowledgement: duplicate, duplicate: true};
     }
     action();
-    this.#sendNewAcknowledgement(response, commandId);
-    return false;
+    const acknowledgement: CommandAcknowledgement = {
+      protocolVersion: PROTOCOL_VERSION,
+      commandId,
+      accepted: true,
+      duplicate: false,
+      sessionId: FAKE_SESSION_ID,
+      lastSequence: this.events.latestSequence(FAKE_SESSION_ID),
+    };
+    this.#commands.remember(acknowledgement);
+    return {acknowledgement, duplicate: false};
+  }
+
+  #sendAcknowledgement(
+    response: ServerResponse,
+    execution: CommandExecution,
+  ): void {
+    this.#sendJson(
+      response,
+      execution.duplicate ? 200 : 202,
+      execution.acknowledgement,
+    );
   }
 
   #sendNewAcknowledgement(

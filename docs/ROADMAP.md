@@ -95,7 +95,8 @@ text, interruption, both approval choices, and sustained audio.
 
 ## Stage 1.5 — Push and secure-transport feasibility
 
-**Status:** In progress; runtime pump host build passed, hardware check pending.
+**Status:** Local push implemented and host-tested; physical push/reconnect and
+R-010 hardware checks pending.
 
 This stage is intentionally before a real adapter because a blocking or
 unsupportable connection layer would invalidate later work.
@@ -115,6 +116,20 @@ Deliver in this risk order:
 
 All test transports must remain bidirectional: captures and controls go to the
 bridge; agent state, response deltas, approvals, and errors come back to the 3DS.
+
+Host implementation in `0.1.2-stage1.5`:
+
+- a dedicated development-only raw TCP control port (`8081` by default);
+- bounded newline-delimited JSON in both directions;
+- immediate pushed events with no 3DS event polling;
+- last-applied cursor replay and visible resync on expired/ahead history;
+- one durable command retried by the same ID after reconnect;
+- three/eight-second client heartbeat and twelve-second bridge idle cleanup;
+- 250 ms to ten-second jittered reconnect backoff;
+- 256-event and 128 KiB event-history bounds with socket backpressure;
+- existing independent HTTP microphone stream retained for isolation.
+
+This local raw TCP experiment does not accept raw TCP as the remote framing.
 
 Exit criterion: pushed local events recover from a forced disconnect without UI
 freezes, and R-010 has enough hardware evidence to accept or reject a secure
@@ -153,6 +168,9 @@ Deliver:
 - retry;
 - configurable transcription provider/local backend.
 
+Accepted behavior: show the transcript on the 3DS after recording and require a
+separate explicit send action; allow cancel/edit where practical.
+
 Complete the useful local voice→agent loop before adding remote transport risk.
 
 ---
@@ -172,6 +190,8 @@ Security review required.
 ---
 
 ## Stage 5 — Remote relay
+
+**Initial distribution:** self-hosted.
 
 Deliver:
 - authenticated bridge↔relay;
@@ -198,7 +218,9 @@ Deliver:
 
 ## Stage 7 — Stylus capture
 
-Deliver:
+**Status:** Outside the current product goal.
+
+If revisited later:
 - sketch canvas;
 - undo/clear;
 - send;

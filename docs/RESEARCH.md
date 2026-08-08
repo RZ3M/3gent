@@ -470,8 +470,28 @@ Do not invent custom cryptography.
 
 ## R-011 — Codex rich integration
 
+**Status:** INSTALLED INTERFACE INSPECTED / ADAPTER NOT YET IMPLEMENTED
+
 **Current finding:**
 Codex provides a local `app-server` intended for rich clients. It supports structured thread/turn/item lifecycle, streaming events, approvals, and diff updates.
+
+**2026-08-08 installed-version inspection:**
+
+- Installed CLI: `codex-cli 0.144.5` at `/opt/homebrew/bin/codex`.
+- `codex app-server --listen stdio://` accepts newline-delimited JSON-RPC and
+  successfully completes `initialize`.
+- `codex app-server generate-json-schema` and `generate-ts` produce the
+  authoritative bindings for this installed version.
+- Required v2 methods exist: `thread/list`, `thread/resume`, `thread/start`,
+  `turn/start`, `turn/interrupt`, and approval responses.
+- Required notifications/requests exist: thread/turn state, agent-message
+  deltas, item lifecycle, turn completion, diff updates, errors, command/file
+  approvals, and permission approvals.
+- Initial policy mapping: expose only single-use command/file acceptance plus
+  decline/cancel. Do not expose session-wide acceptance, executable/network
+  policy amendments, or permission-profile escalation on the handheld.
+- Codex-native IDs and objects must stop at the adapter. The bridge needs stable
+  3gent session IDs, bounded/coalesced text deltas, and compact diff summaries.
 
 **Recommended first adapter path:**
 - spawn `codex app-server --listen stdio://`;
@@ -479,8 +499,7 @@ Codex provides a local `app-server` intended for rich clients. It supports struc
 - translate app-server events into 3gent events;
 - keep Codex auth entirely on desktop.
 
-**Research needed:**
-- schema generation for installed Codex version;
+**Implementation/research still needed:**
 - session resume behavior;
 - cancellation;
 - approval mapping;
@@ -584,6 +603,67 @@ agent-agnostic local session loop before a real agent is introduced?
 a qualitative core hardware pass. Complete the focused `0.1.1-stage1`
 reliability checks, then prove local push and R-010 before beginning the Codex
 adapter.
+
+---
+
+## R-014 — Local pushed bidirectional control
+
+**Question:** Can the 3DS receive agent output immediately without periodic HTTP
+event requests while retaining bounded memory, replay, command safety, and a
+responsive frame loop?
+
+**Status:** HOST PASS / PHYSICAL 3DS TEST PENDING
+
+**2026-08-08 implementation record:**
+
+- Version `0.1.2-stage1.5` replaces the handheld event-poll loop with one
+  long-lived development-only raw TCP control connection on port 8081. The HTTP
+  service on port 8080 remains for audio and host fixtures.
+- Control framing is newline-delimited UTF-8 JSON with a 4 KiB per-frame/input
+  bound. Existing protocol-v1 event envelopes and command acknowledgements are
+  wrapped rather than redefined.
+- Text captures, interrupt commands, and approval responses travel 3DS→bridge;
+  acknowledgements, errors, session state, approvals, and assistant deltas are
+  pushed bridge→3DS on the same link.
+- The 3DS retains at most one mutating command until acknowledgement. If the
+  connection drops after send, the exact command frame and ID are retried;
+  bridge deduplication prevents a previously accepted command from running
+  twice.
+- The client resumes from its last applied event sequence. Expired or ahead
+  cursors receive a bounded `resync.required` snapshot and a visible output-gap
+  marker before reconnect.
+- Client liveness sends a ping after three seconds without inbound traffic and
+  reconnects after eight seconds without any response. Retry starts around 250
+  ms, doubles to a ten-second cap, and adds ±20 percent jitter. The bridge drops
+  peers that send no traffic for twelve seconds.
+- The bridge event history now has both a 256-event cap and a 128 KiB cap.
+  Per-client delivery relies on socket backpressure and replay instead of an
+  unbounded event queue.
+- Ordinary verbose logs show meaningful push frames but suppress ping/pong.
+  `--verbose-polls` remains the explicit noisy diagnostics mode and also shows
+  push heartbeats.
+- The native software keyboard is modal and stops the application frame loop.
+  The client now closes the push link before opening it and resumes from the
+  applied cursor afterward instead of predictably hitting heartbeat timeout
+  during normal typing.
+- Explicit bridge-only hardware diagnostics can blackhole outbound push frames,
+  drop one post-execution acknowledgement, and slow fake deltas. They are off by
+  default and print a warning when enabled.
+- Host result: strict TypeScript build plus 23 automated tests pass, including
+  immediate push, reconnect deduplication, invalid-cursor resync, oversized
+  frame rejection, heartbeat cleanup, and byte-budget eviction.
+- Handheld build result: devkitARM r68-1/libctru 2.7.0-1 compile succeeds. The
+  ELF contains 208,516 bytes text, 7,808 bytes data, and 73,488 bytes BSS; the
+  packaged 3DSX is 232,184 bytes.
+
+**Not yet proven:** real 3DS connection establishment, event latency, heartbeat
+behavior over 2.4 GHz Wi-Fi, bridge restart, command replay at the failure
+boundary, lid close/resume, simultaneous audio/event activity, Old 3DS memory
+and CPU behavior, and UI responsiveness during all failures.
+
+**Conclusion:** the local host/client implementation is ready for a focused
+physical test. This proves push mechanics only; it does not choose raw TCP for
+the encrypted self-hosted relay. R-010 still gates that decision.
 
 ---
 

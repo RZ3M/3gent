@@ -80,10 +80,11 @@ Once the interactive frame loop starts, network setup, send, receive, and audio
 finalization must make bounded zero-wait progress. A half-open connection must
 not prevent screen drawing, button scanning, or local navigation.
 
-The `0.1.1-stage1` client implements this as a single-threaded per-frame network
-pump with fixed request, response, and audio queues. Startup connection warmup
-remains a separately visible, bounded development step. DNS, TLS, heartbeat,
-reconnect, and future push framing must preserve the same runtime invariant.
+The `0.1.2-stage1.5` client implements this as a single-threaded per-frame
+network pump with fixed control-frame, command, response, and audio queues.
+Push connect/send/receive, heartbeat, and reconnect all follow the invariant.
+Startup audio warmup remains a separately visible, bounded development step.
+DNS and TLS must preserve the same behavior.
 
 ### Constraints
 
@@ -110,13 +111,15 @@ The bridge is 3gent's trusted local control plane.
 Stage 1 implements the bridge in TypeScript on Node.js. The fake-agent adapter,
 HTTP transport, protocol validation, event store, and command registry are
 separate modules so the Codex adapter can replace only the fake-agent boundary
-in Stage 2. The current 3DS client sends versioned commands over one warm HTTP
-connection, streams microphone PCM over a second, and checks bounded NDJSON
-event batches using a per-session sequence cursor. These operations advance
-asynchronously in the handheld frame loop. Event checks are adaptive: fast
-while an agent is working, slower for an approval, quiet while idle, and backed
-off after failures. This is a local bridge experiment, not the final push
-transport.
+in Stage 2. Version `0.1.2-stage1.5` adds a separate development-only raw TCP
+control link. Text captures, interrupts, and approval responses travel toward
+the bridge while acknowledgements, errors, agent state, and response events are
+pushed back as bounded JSON lines. The link preserves the per-session cursor,
+replays after reconnect, retries one unacknowledged command by ID, sends
+heartbeats, and reconnects with jitter. Microphone PCM continues over the proven
+independent HTTP stream. Every runtime operation advances asynchronously in the
+handheld frame loop. This local framing experiment is not the final encrypted
+remote transport.
 
 ### Responsibilities
 
@@ -280,10 +283,9 @@ The relay should not:
 
 ### Hosting decision
 
-Pending:
-- official hosted relay;
-- self-host only;
-- both.
+The first relay is self-hosted. The application protocol should remain usable
+by a later hosted service, but a public 3gent relay is not part of the first
+functional product.
 
 ## 8. Connection modes
 
@@ -310,6 +312,9 @@ This is a first-class user workflow because 3DS Wi-Fi support is old and guest/c
 ```
 
 Core remote-use path.
+
+The first relay distribution is self-hosted. A hosted service can be added
+later without changing the 3DS application protocol.
 
 ### Remote transport sequencing
 

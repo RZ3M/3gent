@@ -13,11 +13,12 @@ SOURCES     := source
 INCLUDES    := include
 
 APP_TITLE       := 3gent
-APP_DESCRIPTION := Stage 1 local bridge build
+APP_DESCRIPTION := Stage 1.5 pushed bridge build
 APP_AUTHOR      := 3gent contributors
 
 SERVER_HOST ?= 192.168.1.2
 SERVER_PORT ?= 8080
+PUSH_PORT ?= 8081
 
 ARCH := -march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
@@ -25,7 +26,8 @@ CFLAGS := -g -Wall -Wextra -Werror -O2 -mword-relocations \
           -ffunction-sections $(ARCH)
 CFLAGS += $(INCLUDE) -D__3DS__ -std=gnu11 \
           -DTHREEGENT_SERVER_HOST=\"$(SERVER_HOST)\" \
-          -DTHREEGENT_SERVER_PORT=$(SERVER_PORT)
+          -DTHREEGENT_SERVER_PORT=$(SERVER_PORT) \
+          -DTHREEGENT_PUSH_PORT=$(PUSH_PORT)
 
 ASFLAGS := -g $(ARCH)
 LDFLAGS := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)

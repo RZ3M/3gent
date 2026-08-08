@@ -33,7 +33,7 @@ export class FakeAgent {
     private readonly deltaIntervalMs = 80,
   ) {
     this.events.append(FAKE_SESSION_ID, "connection.ready", {
-      bridge: "3gent-stage1",
+      bridge: "3gent-stage1.5",
       adapter: "fake",
     });
     this.#emitSessionUpdated();

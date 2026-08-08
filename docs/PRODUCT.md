@@ -110,15 +110,20 @@ core product loop is incomplete.
 
 ### UC-01 — Voice prompt
 
+Target flow (implemented in Stage 3; the current fake adapter still uses a mock
+transcript without review):
+
 1. User opens a connected agent session.
 2. User holds push-to-talk.
 3. 3DS records a bounded audio capture.
 4. User releases the button.
 5. Capture is uploaded.
 6. Desktop side transcribes it.
-7. Transcript becomes an agent prompt.
-8. Agent response streams back.
-9. 3DS renders progress and final output.
+7. 3DS shows the transcript for review.
+8. User explicitly sends it, edits it through the native keyboard, or cancels.
+9. The accepted transcript becomes an agent prompt.
+10. Agent response streams back.
+11. 3DS renders progress and final output.
 
 ### UC-02 — Typed prompt
 
@@ -140,7 +145,7 @@ core product loop is incomplete.
 
 User can interact with their agent while the 3DS and development computer are on different networks.
 
-### UC-05 — Photo capture (post-MVP)
+### UC-05 — Photo capture (after the core MVP)
 
 User takes a photo and attaches it to a prompt.
 
@@ -150,9 +155,12 @@ Examples:
 - hardware/setup photo;
 - whiteboard.
 
-### UC-06 — Stylus sketch (post-MVP)
+### UC-06 — Stylus sketch (outside the current product goal)
 
 User draws a diagram or wireframe and sends it as a Capture.
+
+The Capture model keeps this possible, but the current build goal deliberately
+omits the sketch canvas.
 
 ## 5. MVP
 
@@ -207,11 +215,8 @@ The MVP succeeds when:
 See `DECISIONS.md`.
 
 Important unresolved items:
-- public relay vs self-host-only;
 - licensing;
-- whether new agent sessions can be started remotely in v1;
 - whether Old 3DS remains fully supported after benchmarking;
-- transcript review/edit behavior;
 - exact approval categories;
 - production remote transport and reconnect behavior.
 - whether production voice shares the control connection or uses an independent

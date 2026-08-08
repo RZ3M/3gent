@@ -1,4 +1,4 @@
-# 3gent Stage 1 3DS client
+# 3gent Stage 1.5 3DS client
 
 This client connects the handheld feasibility work to the TypeScript desktop
 bridge and its deterministic fake agent. It is still a local-development build,
@@ -8,10 +8,12 @@ The client currently provides:
 
 - native software-keyboard text capture;
 - bounded-memory live microphone streaming using signed PCM16 mono at 16,364 Hz;
-- two pre-warmed HTTP/1.1 connections for low-latency commands and audio;
+- one pre-warmed HTTP/1.1 audio connection plus the pushed control link;
 - non-blocking per-frame runtime connection, send, receive, and finalization;
 - protocol-v1 commands with unique command IDs;
-- bounded adaptive NDJSON event checks with a per-session sequence cursor;
+- a persistent bidirectional pushed-control link with no event polling;
+- heartbeat, jittered reconnect, applied-cursor replay, and visible resync;
+- safe retry of one unacknowledged command with its original command ID;
 - incremental fake-agent text, status, approval, and interruption UI;
 - fixed 2 KiB response storage and held-button scroll navigation.
 
@@ -37,26 +39,27 @@ the 3DS client with that numeric address:
 
 ```sh
 cd client-3ds
-make SERVER_HOST=192.168.1.42 SERVER_PORT=8080
+make SERVER_HOST=192.168.1.42 SERVER_PORT=8080 PUSH_PORT=8081
 ```
 
 Replace `192.168.1.42` with the computer's address. Runtime configuration and
 pairing come in later stages. The build produces `3gent.3dsx`, `3gent.smdh`,
 `3gent.elf`, and `build/3gent.map`.
 
-From the repository root, install, test, and start the Stage 1 bridge:
+From the repository root, install, test, and start the Stage 1.5 bridge:
 
 ```sh
 cd bridge
 npm ci
 npm test
-npm start -- --host 0.0.0.0 --port 8080
+npm start -- --host 0.0.0.0 --port 8080 --push-port 8081
 ```
 
 For full request, prompt, acknowledgement, event, and audio-chunk diagnostics,
 append `--verbose`. Empty event checks are hidden so the terminal shows only
-meaningful traffic. Use `--verbose-polls` only when diagnosing the polling loop;
-it implies verbose mode and restores every empty request/response line. Both
+meaningful traffic. Push ping/pong heartbeats are also hidden. Use
+`--verbose-polls` only for deliberately noisy transport diagnostics; it implies
+verbose mode and restores legacy empty HTTP polls and push heartbeats. Both
 modes can print sensitive prompt and agent content and should be used only for
 deliberate local debugging.
 
@@ -69,7 +72,7 @@ internet.
 Copy `3gent.3dsx` and `3gent.smdh` into `3ds/3gent/` on the SD card, then launch
 3gent through the Homebrew Launcher.
 
-The Stage 1 controls are:
+The Stage 1.5 controls are:
 
 - `A`: open the native keyboard and send text to the fake agent;
 - `X`: start a fake approval demo, or approve once when one is pending;
@@ -82,13 +85,14 @@ Successful audio is saved as `bridge/data/latest.wav`. The fake adapter does not
 transcribe it yet; it generates a mock voice-capture response so the full event
 path can be tested.
 
-## Physical Stage 1 verification checklist
+## Physical Stage 1.5 verification checklist
 
 Record the hardware model, host OS, tool versions, and displayed timings.
 
 1. Start the TypeScript bridge and confirm it prints its listening address.
-2. Launch `0.1.1-stage1` through the Homebrew Launcher.
-3. Confirm startup reports `warm links: 2/2`, then shows agent state `idle`.
+2. Launch `0.1.2-stage1.5` through the Homebrew Launcher.
+3. Confirm startup reports the audio link warm, `Control push: ready`, and agent
+   state `idle`.
 4. Press `A`, cancel the keyboard, and confirm the app returns safely.
 5. Press `A`, send `hello from 3DS`, and confirm the bridge accepts it almost
    immediately.
@@ -107,30 +111,61 @@ Record the hardware model, host OS, tool versions, and displayed timings.
     PCM duration continues increasing and audio starts without the old delay.
 13. Release `R`; confirm the fake voice response streams on screen and
     `bridge/data/latest.wav` has the expected duration and intelligible audio.
-14. Leave the app idle for at least eleven minutes, then send another prompt and
-    start a short audio capture. Record whether both connections recover without
-    restarting the app.
-15. With a scrollable response on screen, stop the bridge. While an event check
-    and then a user command fail in the background, hold Up/Down and confirm the
-    screen and held-repeat navigation never freeze for the five-second network
-    timeout.
-16. Restart the bridge and confirm the app reports a session resync, then sends a
-    new prompt and displays the complete fake-agent response without restarting
-    the app.
+14. Leave the app idle for at least eleven minutes. Confirm the bridge terminal
+    stays quiet in ordinary verbose mode, then send another prompt and start a
+    short audio capture without restarting the app.
+15. With a scrollable response on screen, stop the bridge. Hold Up/Down and
+    confirm the screen and held-repeat navigation never freeze while the pushed
+    link detects heartbeat loss and enters reconnect backoff.
+16. Restart the bridge. Confirm `Control push` returns to ready, the app visibly
+    reports a session resync if the bridge cursor restarted, and a new prompt
+    displays the complete fake-agent response without restarting the app.
 17. Stop the bridge during a short microphone capture, release `R`, and confirm
     the finalizing UI remains live until it reports a bounded stream error.
-18. Close and reopen the shell during an active turn and record the resulting
-    stop, error, or resume behavior.
+18. Close and reopen the 3DS lid during an active turn and record the resulting
+    stop, replay, resync, or resume behavior.
 19. Press `START` and confirm a clean return to the Homebrew Launcher.
+20. Restart the bridge with `--verbose-polls`. Leave the 3DS idle for at least
+    five seconds; confirm `ping`/`pong` appears, `Control push` remains ready,
+    and no `GET /v1/events` request appears at any time.
+21. Press `A`, leave the native keyboard open for at least twenty seconds, then
+    cancel. The app deliberately reconnects around this modal system screen;
+    confirm it returns to `Control push: ready` without freezing or losing later
+    agent events.
+22. Restart with `--fake-delta-ms 1000`, start a turn, close the 3DS lid for two
+    to five seconds during output, then reopen it before the bridge exits. Confirm
+    the same bridge replays ordered deltas with no duplicate or missing text.
+23. Restart with `--push-test-blackhole --verbose-polls`. Confirm the client
+    detects about eight seconds without inbound traffic, leaves `ready`, and
+    reconnects without blocking scrolling or buttons. Remove the flag afterward.
+24. Restart with `--push-test-drop-next-ack --verbose`, then submit one prompt.
+    Confirm the bridge executes it once, drops the link before acknowledgement,
+    and reports the retried command as replayed/duplicate after reconnect. The
+    3DS must show only one turn.
+25. Stop the bridge, type and submit one prompt while `Control push` is retrying,
+    then attempt a second prompt. Confirm one bounded command is queued, the
+    second attempt gives clear busy feedback, scrolling remains responsive, and
+    restoring the bridge sends exactly the first prompt once.
+26. Close the lid for more than twelve seconds. With verbose logging, confirm the
+    bridge releases the silent peer; reopen the lid and confirm automatic cursor
+    resume or visible resync.
+27. With `--verbose-polls`, hold `R` and speak for more than five seconds. Confirm
+    push heartbeats and any agent events continue while PCM streams/finalizes and
+    neither direction blocks the other.
 
-Do not mark the Stage 1 handheld slice complete until steps 1–13 pass. The
-long-idle, restart, and shell behavior are explicit reliability follow-ups even
-if the main vertical slice succeeds.
+Cursor-expired recovery, coalesced TCP frames, lost acknowledgements, slow-peer
+backpressure, byte-budget eviction, and malformed/oversized frames also have
+deterministic host tests. The physical checklist concentrates on behavior that
+depends on real 3DS Wi-Fi, sleep, modal keyboard, input, and rendering.
 
-The current development client checks for agent events about every 100 ms while
-working, 250 ms while an approval is pending, once per second while idle, and
-with one-to-ten-second retry backoff after failure. These are bridge reads, not
-phantom button events. Local push delivery is the next transport experiment.
+Do not mark the Stage 1.5 pushed link complete until every applicable step
+passes. Host-only fault-injection checks are recorded separately in the bridge
+test suite; hardware results must never be inferred from those tests.
+
+The current development client does not poll for events. The bridge pushes them
+over port 8081. After three seconds without inbound traffic the 3DS sends a
+heartbeat; after eight seconds without any response it reconnects with jittered
+250 ms-to-ten-second backoff. Ordinary verbose logs suppress heartbeats.
 
 ## Troubleshooting
 

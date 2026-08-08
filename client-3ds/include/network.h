@@ -22,6 +22,41 @@ unsigned int network_warm_connection_count(void);
 void network_stop(void);
 
 /*
+ * Development pushed-control link. It is a long-lived, non-blocking JSON-line
+ * connection. One mutating command is retained until its acknowledgement so
+ * reconnect can safely retry the same command ID.
+ */
+bool network_push_start(
+    const char *host,
+    unsigned short port,
+    const char *session_id,
+    unsigned int after,
+    char *error,
+    size_t error_capacity
+);
+bool network_push_is_ready(void);
+const char *network_push_state(void);
+const char *network_push_error(void);
+bool network_push_has_frame(void);
+const char *network_push_frame(void);
+void network_push_consume_frame(void);
+void network_push_set_cursor(unsigned int cursor);
+bool network_push_send_text(
+    const char *text,
+    char *error,
+    size_t error_capacity
+);
+bool network_push_send_interrupt(char *error, size_t error_capacity);
+bool network_push_send_approval(
+    const char *approval_id,
+    const char *choice,
+    char *error,
+    size_t error_capacity
+);
+bool network_push_acknowledge(const char *command_id);
+void network_push_stop(void);
+
+/*
  * Runtime control requests are advanced by network_pump(). Starting a request
  * only copies bounded request data and begins a non-blocking connection/send;
  * it never waits for the peer. Exactly one control request may be active.

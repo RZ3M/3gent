@@ -2,11 +2,15 @@
 
 **3gent** is an open-source Nintendo 3DS companion for remote coding agents.
 
-The 3DS is a **thin client**: it captures voice, text, photos, and stylus sketches; shows agent state and responses; and lets the user handle approvals. A desktop-side bridge owns the coding environment, agent integrations, transcription, repository access, and security-sensitive operations.
+The 3DS is a **thin client**: it captures voice, text, and photos; shows agent
+state and responses; and lets the user handle approvals. A desktop-side bridge
+owns the coding environment, agent integrations, transcription, repository
+access, and security-sensitive operations. Stylus sketch capture is deliberately
+outside the current product goal.
 
 ## Product sentence
 
-> A pocket remote for your coding agents, built around the hardware the 3DS is actually good at: microphone, camera, stylus, buttons, and two small screens.
+> A pocket remote for your coding agents, built around the hardware the 3DS is actually good at: microphone, camera, buttons, and two small screens.
 
 ## What we are building now
 
@@ -56,12 +60,13 @@ actions no longer pay a fresh TCP handshake; its focused hardware retest passed.
 The new `bridge/` service is a TypeScript/Node implementation of the Stage 1
 agent boundary with a deterministic fake adapter. Its automated tests cover the
 protocol version, sessions, ordered/replayed events, duplicate commands,
-approvals, interruption, and streamed audio/WAV output. The `0.1.1-stage1` 3DS
-client advances runtime network work incrementally once per frame, prioritizes
-user commands over background event reads, and adapts local event checks from
-fast while an agent is working to quiet while idle. It builds successfully; the
-earlier `0.1.0-stage1` physical vertical-slice run was reported as working well,
-while the new no-freeze behavior still needs its focused hardware check.
+approvals, interruption, and streamed audio/WAV output. The
+`0.1.2-stage1.5` 3DS client now uses a persistent pushed control link: commands
+go to the bridge and agent events return immediately without HTTP polling. It
+adds heartbeat, jittered reconnect, cursor replay, visible resync, and safe
+retry of one unacknowledged command. The bridge has 23 passing automated tests
+and the handheld build succeeds; this new pushed path still needs its focused
+physical hardware check.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical Stage 1 checklist. See [`bridge/README.md`](bridge/README.md) for the
@@ -76,7 +81,8 @@ reproducible Stage 0 fixture.
 - The 3DS is a thin client, not an AI runtime.
 - Voice is the primary input.
 - Native software keyboard is the text fallback.
-- Photos and stylus sketches are first-class future capture modes.
+- Photo capture follows the core MVP; stylus sketch capture is deferred outside
+  the current goal.
 - Remote use is a core requirement.
 - Compatible phone/computer hotspot usage is first-class.
 - QR pairing is the default pairing method.
@@ -122,14 +128,14 @@ Codex supports repository-level `AGENTS.md` instructions, so this repo uses `AGE
 
 ## Current phase
 
-**Stage 1: local fake-agent vertical slice.**
+**Stage 1.5: pushed local fake-agent transport.**
 
-The host implementation is complete and the core physical Stage 1 run works.
-Focused approval, interruption, reconnect, long-idle, audio-quality, and
-sleep/resume results are still being recorded. Runtime I/O no longer waits on a
-socket in the 3DS frame loop. Push event delivery and an early secure-transport
-feasibility spike now precede the first real desktop adapter; the remote relay
-and production authentication remain deliberately deferred.
+The Stage 1 fake-agent loop has a qualitative physical pass. Local pushed
+bidirectional control is now implemented and host-tested with no event polling;
+its physical reconnect, heartbeat, audio concurrency, sleep/resume, and
+no-freeze checklist is next. The installed Codex app-server schema has been
+inspected in preparation for the first real adapter. Secure-transport
+feasibility still precedes the self-hosted remote relay.
 
 ## License status
 

@@ -16,29 +16,16 @@
 #define SCROLL_REPEAT_INTERVAL_FRAMES 4
 #define MIC_STREAM_BUFFER_CAPACITY 8192
 #define MIC_STREAM_SEND_THRESHOLD 1024
-#define EVENT_POLL_WORKING_FRAMES 6
-#define EVENT_POLL_APPROVAL_FRAMES 15
-#define EVENT_POLL_IDLE_FRAMES 60
-#define EVENT_POLL_RETRY_INITIAL_FRAMES 60
-#define EVENT_POLL_RETRY_MAX_FRAMES 600
-#define EVENT_POLL_BATCH_LIMIT 3U
 #define STAGE1_SESSION_ID "ses_fake_local"
-#define STAGE1_TEXT_CAPTURE_PATH \
-    "/v1/sessions/" STAGE1_SESSION_ID "/captures/text"
 #define STAGE1_AUDIO_CAPTURE_PATH \
     "/v1/sessions/" STAGE1_SESSION_ID "/captures/audio"
-#define STAGE1_SESSION_PATH "/v1/sessions/" STAGE1_SESSION_ID
-#define STAGE1_INTERRUPT_PATH \
-    "/v1/sessions/" STAGE1_SESSION_ID "/turns/current/interrupt"
 
 typedef enum {
-    CONTROL_REQUEST_NONE = 0,
-    CONTROL_REQUEST_EVENT_POLL,
-    CONTROL_REQUEST_SESSION_RESYNC,
-    CONTROL_REQUEST_TEXT_CAPTURE,
-    CONTROL_REQUEST_APPROVAL,
-    CONTROL_REQUEST_INTERRUPT,
-} ControlRequestKind;
+    PUSH_COMMAND_NONE = 0,
+    PUSH_COMMAND_TEXT_CAPTURE,
+    PUSH_COMMAND_APPROVAL,
+    PUSH_COMMAND_INTERRUPT,
+} PushCommandKind;
 
 static PrintConsole top_console;
 static PrintConsole bottom_console;
@@ -52,7 +39,6 @@ static char pending_approval_id[65];
 static char pending_approval_summary[96];
 static char view_state[32] = "Ready";
 static char event_detail[96];
-static char event_batch[THREEGENT_RESPONSE_CAPACITY];
 static char wrapped_lines[RESPONSE_MAX_LINES][RESPONSE_WRAP_COLUMNS + 1];
 static u8 microphone_stream_buffer[MIC_STREAM_BUFFER_CAPACITY];
 static bool network_ready;
@@ -68,15 +54,10 @@ static unsigned int microphone_link_latency_ms;
 static size_t response_scroll_lines;
 static int scroll_repeat_direction;
 static u32 scroll_repeat_frames;
-static u32 event_poll_frames;
-static u32 event_poll_retry_frames = EVENT_POLL_RETRY_INITIAL_FRAMES;
-static u32 event_poll_failure_wait_frames = EVENT_POLL_RETRY_INITIAL_FRAMES;
 static unsigned int event_cursor;
 static bool turn_active;
-static bool event_poll_failed;
-static ControlRequestKind control_request_kind;
-static u64 control_request_started_ms;
-static char control_accepted_state[32];
+static PushCommandKind push_command_kind;
+static u64 push_command_started_ms;
 
 static void set_view_state(const char *state)
 {
@@ -141,7 +122,7 @@ static void draw_top(void)
     consoleClear();
 
     printf("3gent | %s\n", THREEGENT_APP_VERSION);
-    printf("Stage 1 | Local fake agent\n");
+    printf("Stage 1.5 | Pushed fake agent\n");
     printf("Agent: %s | event %u\n", agent_state, event_cursor);
     printf("State: %s\n", view_state);
     if (prompt[0] != '\0') {
@@ -185,7 +166,7 @@ static void draw_bottom(void)
     consoleSelect(&bottom_console);
     consoleClear();
 
-    printf("A: Type + send to fake agent\n");
+    printf("A: Type + send to agent\n");
     if (pending_approval_id[0] != '\0') {
         printf("X: Approve once | B: Decline\n");
     } else if (turn_active) {
@@ -196,12 +177,18 @@ static void draw_bottom(void)
     printf("R: Hold to stream mic (5 min max)\n");
     printf("UP/DOWN: Scroll response\n");
     printf("START: Exit\n\n");
-    printf("Server: %s:%u\n", THREEGENT_SERVER_HOST, (unsigned int)THREEGENT_SERVER_PORT);
     printf(
-        "Network: %s | warm links: %u/2\n",
-        network_ready ? "ready" : "unavailable",
-        network_warm_connection_count()
+        "Server: %s:%u/%u\n",
+        THREEGENT_SERVER_HOST,
+        (unsigned int)THREEGENT_SERVER_PORT,
+        (unsigned int)THREEGENT_PUSH_PORT
     );
+    printf(
+        "Network: %s | audio warm: %u\n",
+        network_ready ? "ready" : "unavailable",
+        network_warm_connection_count() > 0 ? 1U : 0U
+    );
+    printf("Control push: %s\n", network_push_state());
     printf(
         "Mic: %s (PCM16 mono, 16364 Hz)\n",
         microphone_is_ready() ? "ready" : "unavailable"
@@ -483,27 +470,7 @@ static void handle_protocol_event(const char *event_json)
     }
 
     event_cursor = sequence;
-}
-
-static bool handle_event_batch(char *batch)
-{
-    bool handled = false;
-    char *line = batch;
-    while (*line != '\0') {
-        char *line_end = strchr(line, '\n');
-        if (line_end != NULL) {
-            *line_end = '\0';
-        }
-        if (line[0] != '\0') {
-            handle_protocol_event(line);
-            handled = true;
-        }
-        if (line_end == NULL) {
-            break;
-        }
-        line = line_end + 1;
-    }
-    return handled;
+    network_push_set_cursor(event_cursor);
 }
 
 static bool apply_session_snapshot(const char *snapshot)
@@ -548,238 +515,114 @@ static bool apply_session_snapshot(const char *snapshot)
     if (pending_approval_id[0] != '\0') {
         append_response("Approval is still pending. X: approve once | B: decline\n");
     }
-    event_poll_failed = false;
-    event_poll_retry_frames = EVENT_POLL_RETRY_INITIAL_FRAMES;
-    event_poll_failure_wait_frames = EVENT_POLL_RETRY_INITIAL_FRAMES;
+    network_push_set_cursor(event_cursor);
     snprintf(event_detail, sizeof(event_detail), "Events: resynced at %u", event_cursor);
     set_view_state("Session resynchronized");
     return true;
 }
 
-static u32 desired_event_poll_frames(void)
+static void handle_push_frame(const char *frame)
 {
-    if (event_poll_failed) {
-        return event_poll_failure_wait_frames;
-    }
-    if (pending_approval_id[0] != '\0'
-        || strcmp(agent_state, "waiting_for_user") == 0) {
-        return EVENT_POLL_APPROVAL_FRAMES;
-    }
-    if (turn_active || strcmp(agent_state, "working") == 0) {
-        return EVENT_POLL_WORKING_FRAMES;
-    }
-    return EVENT_POLL_IDLE_FRAMES;
-}
-
-static void force_event_poll(void)
-{
-    event_poll_frames = desired_event_poll_frames();
-}
-
-static void mark_event_poll_failure(const char *prefix, const char *detail)
-{
-    snprintf(
-        event_detail,
-        sizeof(event_detail),
-        "%s: %.82s",
-        prefix,
-        detail != NULL ? detail : "unknown network error"
-    );
-    event_poll_failed = true;
-    event_poll_frames = 0;
-    event_poll_failure_wait_frames = event_poll_retry_frames;
-    if (event_poll_retry_frames < EVENT_POLL_RETRY_MAX_FRAMES) {
-        event_poll_retry_frames *= 2;
-        if (event_poll_retry_frames > EVENT_POLL_RETRY_MAX_FRAMES) {
-            event_poll_retry_frames = EVENT_POLL_RETRY_MAX_FRAMES;
-        }
-    }
-    set_view_state("Event connection error");
-    redraw();
-}
-
-static void clear_control_request(void)
-{
-    network_control_consume();
-    control_request_kind = CONTROL_REQUEST_NONE;
-    control_request_started_ms = 0;
-    control_accepted_state[0] = '\0';
-}
-
-static bool start_control_get(ControlRequestKind kind, const char *path)
-{
-    if (control_request_kind != CONTROL_REQUEST_NONE) {
-        return false;
-    }
-    if (!network_control_begin_get(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
-            path,
-            network_detail,
-            sizeof(network_detail)
-        )) {
-        return false;
-    }
-    control_request_kind = kind;
-    control_request_started_ms = osGetTime();
-    return true;
-}
-
-static bool start_control_post(
-    ControlRequestKind kind,
-    const char *path,
-    const char *content_type,
-    const void *body,
-    size_t body_size,
-    const char *accepted_state
-)
-{
-    if (control_request_kind == CONTROL_REQUEST_EVENT_POLL
-        || control_request_kind == CONTROL_REQUEST_SESSION_RESYNC) {
-        network_control_cancel();
-        control_request_kind = CONTROL_REQUEST_NONE;
-    }
-    if (control_request_kind != CONTROL_REQUEST_NONE) {
-        snprintf(network_detail, sizeof(network_detail), "Another command is still sending");
-        set_view_state("Command busy");
-        redraw();
-        return false;
-    }
-    if (!network_control_begin_post(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
-            path,
-            content_type,
-            body,
-            body_size,
-            network_detail,
-            sizeof(network_detail)
-        )) {
-        snprintf(response, sizeof(response), "%s", network_detail);
-        set_view_state("Command failed");
-        redraw();
-        return false;
-    }
-    control_request_kind = kind;
-    control_request_started_ms = osGetTime();
-    snprintf(
-        control_accepted_state,
-        sizeof(control_accepted_state),
-        "%s",
-        accepted_state
-    );
-    return true;
-}
-
-static void start_session_resync(void)
-{
-    if (!start_control_get(
-            CONTROL_REQUEST_SESSION_RESYNC,
-            STAGE1_SESSION_PATH
-        )) {
-        mark_event_poll_failure("Resync", network_detail);
-    }
-}
-
-static void finish_control_request(void)
-{
-    NetworkOperationStatus status = network_control_status();
-    if (control_request_kind == CONTROL_REQUEST_NONE
-        || status == NETWORK_OPERATION_IDLE
-        || status == NETWORK_OPERATION_IN_PROGRESS) {
+    char type[40];
+    if (!json_read_string(frame, "type", type, sizeof(type))) {
+        snprintf(event_detail, sizeof(event_detail), "Push: malformed frame");
+        set_view_state("Control link error");
         return;
     }
 
-    ControlRequestKind completed_kind = control_request_kind;
-    bool succeeded = status == NETWORK_OPERATION_SUCCEEDED;
-    unsigned int http_status = network_control_http_status();
-    const char *body = network_control_response();
-    const char *request_error = network_control_error();
-    bool begin_resync = false;
-
-    if (succeeded && completed_kind == CONTROL_REQUEST_EVENT_POLL) {
-        bool recovered = event_poll_failed;
-        event_poll_failed = false;
-        event_poll_retry_frames = EVENT_POLL_RETRY_INITIAL_FRAMES;
-        event_poll_failure_wait_frames = EVENT_POLL_RETRY_INITIAL_FRAMES;
-        event_detail[0] = '\0';
-        snprintf(event_batch, sizeof(event_batch), "%s", body);
-        if (handle_event_batch(event_batch)) {
-            redraw();
-        } else if (recovered) {
-            set_view_state("Event connection restored");
-            redraw();
-        }
-    } else if (succeeded
-        && completed_kind == CONTROL_REQUEST_SESSION_RESYNC) {
-        if (!apply_session_snapshot(body)) {
-            mark_event_poll_failure("Resync", "malformed session snapshot");
+    if (strcmp(type, "connection.ready") == 0) {
+        snprintf(event_detail, sizeof(event_detail), "Events: pushed link ready");
+        set_view_state("Bridge connected");
+    } else if (strcmp(type, "event") == 0) {
+        const char *event_key = strstr(frame, "\"event\":");
+        const char *event_object = event_key != NULL
+            ? strchr(event_key, '{')
+            : NULL;
+        if (event_object == NULL) {
+            snprintf(event_detail, sizeof(event_detail), "Push: missing event");
+            set_view_state("Control link error");
         } else {
-            redraw();
+            handle_protocol_event(event_object);
         }
-    } else if (succeeded) {
+    } else if (strcmp(type, "command.ack") == 0) {
+        char command_id[65];
+        bool matched = json_read_string(
+                frame,
+                "commandId",
+                command_id,
+                sizeof(command_id)
+            ) && network_push_acknowledge(command_id);
+        if (!matched) {
+            snprintf(
+                event_detail,
+                sizeof(event_detail),
+                "Push: ignored stale acknowledgement"
+            );
+            return;
+        }
         snprintf(
             network_detail,
             sizeof(network_detail),
             "Command accepted in %u ms",
-            (unsigned int)(osGetTime() - control_request_started_ms)
+            (unsigned int)(osGetTime() - push_command_started_ms)
         );
-        set_view_state(control_accepted_state);
-        force_event_poll();
-        redraw();
-    } else if (completed_kind == CONTROL_REQUEST_EVENT_POLL
-        && http_status == 409) {
-        begin_resync = true;
-    } else if (completed_kind == CONTROL_REQUEST_EVENT_POLL
-        || completed_kind == CONTROL_REQUEST_SESSION_RESYNC) {
-        mark_event_poll_failure(
-            completed_kind == CONTROL_REQUEST_EVENT_POLL ? "Events" : "Resync",
-            request_error
-        );
-    } else {
-        snprintf(response, sizeof(response), "%s", request_error);
-        snprintf(network_detail, sizeof(network_detail), "%s", request_error);
-        set_view_state(
-            completed_kind == CONTROL_REQUEST_TEXT_CAPTURE
-                ? "Capture error - retry A"
-                : "Command failed"
-        );
-        redraw();
-    }
-
-    clear_control_request();
-    if (begin_resync) {
-        start_session_resync();
+        if (push_command_kind == PUSH_COMMAND_TEXT_CAPTURE) {
+            set_view_state("Capture accepted");
+        } else if (push_command_kind == PUSH_COMMAND_APPROVAL) {
+            set_view_state("Approval sent");
+        } else if (push_command_kind == PUSH_COMMAND_INTERRUPT) {
+            set_view_state("Interrupt sent");
+        }
+        push_command_kind = PUSH_COMMAND_NONE;
+        push_command_started_ms = 0;
+    } else if (strcmp(type, "resync.required") == 0) {
+        if (!apply_session_snapshot(frame)) {
+            snprintf(event_detail, sizeof(event_detail), "Push: malformed resync");
+            set_view_state("Session resync failed");
+        }
+    } else if (strcmp(type, "error") == 0) {
+        char message[128];
+        if (!json_read_string(frame, "message", message, sizeof(message))) {
+            snprintf(message, sizeof(message), "bridge rejected control frame");
+        }
+        snprintf(network_detail, sizeof(network_detail), "Push: %.120s", message);
+        if (push_command_kind == PUSH_COMMAND_TEXT_CAPTURE) {
+            set_view_state("Capture error - retry A");
+        } else {
+            set_view_state("Command failed");
+        }
+        push_command_kind = PUSH_COMMAND_NONE;
+        push_command_started_ms = 0;
     }
 }
 
-static void poll_events_if_due(void)
+static void update_push_link(void)
 {
-    if (!network_ready || recording_session_active
-        || control_request_kind != CONTROL_REQUEST_NONE) {
-        return;
+    static char previous_state[16];
+    const char *state = network_push_state();
+    bool changed = strcmp(previous_state, state) != 0;
+    if (changed) {
+        snprintf(previous_state, sizeof(previous_state), "%s", state);
+        if (strcmp(state, "retrying") == 0
+            || strcmp(state, "connecting") == 0) {
+            snprintf(
+                event_detail,
+                sizeof(event_detail),
+                "Push: %s%s%s",
+                state,
+                network_push_error()[0] != '\0' ? " - " : "",
+                network_push_error()
+            );
+        }
     }
-    event_poll_frames++;
-    if (event_poll_frames < desired_event_poll_frames()) {
-        return;
-    }
-    event_poll_frames = 0;
 
-    char path[160];
-    int path_size = snprintf(
-        path,
-        sizeof(path),
-        "/v1/events?sessionId=%s&after=%u&limit=%u",
-        STAGE1_SESSION_ID,
-        event_cursor,
-        EVENT_POLL_BATCH_LIMIT
-    );
-    if (path_size < 0 || (size_t)path_size >= sizeof(path)) {
-        mark_event_poll_failure("Events", "path exceeded bounded buffer");
-        return;
+    if (network_push_has_frame()) {
+        handle_push_frame(network_push_frame());
+        network_push_consume_frame();
+        changed = true;
     }
-    if (!start_control_get(CONTROL_REQUEST_EVENT_POLL, path)) {
-        mark_event_poll_failure("Events", network_detail);
+    if (changed) {
+        redraw();
     }
 }
 
@@ -804,6 +647,25 @@ static SwkbdButton read_prompt(SwkbdResult *keyboard_result)
     return button;
 }
 
+static bool restart_push_link(void)
+{
+    if (!network_ready) {
+        return false;
+    }
+    if (!network_push_start(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_PUSH_PORT,
+            STAGE1_SESSION_ID,
+            event_cursor,
+            network_detail,
+            sizeof(network_detail)
+        )) {
+        set_view_state("Push link unavailable");
+        return false;
+    }
+    return true;
+}
+
 static void submit_text_capture(const char *text)
 {
     response[0] = '\0';
@@ -826,41 +688,25 @@ static void submit_text_capture(const char *text)
         );
         set_view_state("Error - retry A/X");
     } else {
-        start_control_post(
-            CONTROL_REQUEST_TEXT_CAPTURE,
-            STAGE1_TEXT_CAPTURE_PATH,
-            "text/plain; charset=utf-8",
-            text,
-            strlen(text),
-            "Capture accepted"
-        );
+        if (network_push_send_text(
+                text,
+                network_detail,
+                sizeof(network_detail)
+            )) {
+            push_command_kind = PUSH_COMMAND_TEXT_CAPTURE;
+            push_command_started_ms = osGetTime();
+            set_view_state(
+                network_push_is_ready()
+                    ? "Sending capture..."
+                    : "Capture queued for reconnect"
+            );
+        } else {
+            snprintf(response, sizeof(response), "%s", network_detail);
+            set_view_state("Capture error - retry A");
+        }
     }
 
     redraw();
-}
-
-static bool post_json_command(
-    const char *path,
-    const char *body,
-    const char *accepted_state
-)
-{
-    ControlRequestKind kind = strcmp(path, STAGE1_INTERRUPT_PATH) == 0
-        ? CONTROL_REQUEST_INTERRUPT
-        : CONTROL_REQUEST_APPROVAL;
-    if (!start_control_post(
-            kind,
-            path,
-            "application/json; charset=utf-8",
-            body,
-            strlen(body),
-            accepted_state
-        )) {
-        return false;
-    }
-    set_view_state("Sending command...");
-    redraw();
-    return true;
 }
 
 static void respond_to_approval(const char *choice)
@@ -868,30 +714,20 @@ static void respond_to_approval(const char *choice)
     if (pending_approval_id[0] == '\0') {
         return;
     }
-    char path[192];
-    int path_size = snprintf(
-        path,
-        sizeof(path),
-        "/v1/sessions/%s/approvals/%s/respond",
-        STAGE1_SESSION_ID,
-        pending_approval_id
-    );
-    if (path_size < 0 || (size_t)path_size >= sizeof(path)) {
-        snprintf(network_detail, sizeof(network_detail), "Approval path is too large");
+    if (!network_push_send_approval(
+            pending_approval_id,
+            choice,
+            network_detail,
+            sizeof(network_detail)
+        )) {
         set_view_state("Approval error");
         redraw();
         return;
     }
-
-    char body[64];
-    int body_size = snprintf(body, sizeof(body), "{\"choice\":\"%s\"}", choice);
-    if (body_size < 0 || (size_t)body_size >= sizeof(body)) {
-        snprintf(network_detail, sizeof(network_detail), "Approval body is too large");
-        set_view_state("Approval error");
-        redraw();
-        return;
-    }
-    post_json_command(path, body, "Approval sent");
+    push_command_kind = PUSH_COMMAND_APPROVAL;
+    push_command_started_ms = osGetTime();
+    set_view_state("Sending approval...");
+    redraw();
 }
 
 static void interrupt_active_turn(void)
@@ -899,7 +735,18 @@ static void interrupt_active_turn(void)
     if (!turn_active) {
         return;
     }
-    post_json_command(STAGE1_INTERRUPT_PATH, "", "Interrupt sent");
+    if (!network_push_send_interrupt(
+            network_detail,
+            sizeof(network_detail)
+        )) {
+        set_view_state("Interrupt error");
+        redraw();
+        return;
+    }
+    push_command_kind = PUSH_COMMAND_INTERRUPT;
+    push_command_started_ms = osGetTime();
+    set_view_state("Sending interrupt...");
+    redraw();
 }
 
 static void stop_failed_microphone_stream(const char *error_message)
@@ -1120,7 +967,6 @@ static void update_microphone_capture(void)
             microphone_link_latency_ms
         );
         response[0] = '\0';
-        force_event_poll();
         set_view_state(
             microphone_maximum_reached
                 ? "5-minute audio accepted"
@@ -1272,15 +1118,15 @@ int main(int argc, char **argv)
             snprintf(
                 network_detail,
                 sizeof(network_detail),
-                "2 warm links ready in %u ms",
+                "Audio link ready in %u ms",
                 (unsigned int)(osGetTime() - warmup_started_ms)
             );
             set_view_state("Ready");
         } else {
             set_view_state("Server offline - retry action");
         }
+        restart_push_link();
     }
-    force_event_poll();
     redraw();
 
     while (aptMainLoop()) {
@@ -1290,7 +1136,7 @@ int main(int argc, char **argv)
         u32 keys_up = hidKeysUp();
 
         network_pump();
-        finish_control_request();
+        update_push_link();
 
         if ((keys_down & KEY_START) != 0) {
             break;
@@ -1321,17 +1167,23 @@ int main(int argc, char **argv)
         }
 
         if ((keys_down & KEY_A) != 0) {
-            if (turn_active) {
+            if (turn_active || push_command_kind != PUSH_COMMAND_NONE) {
                 snprintf(
                     network_detail,
                     sizeof(network_detail),
-                    "Wait for or interrupt the active turn"
+                    "%s",
+                    turn_active
+                        ? "Wait for or interrupt the active turn"
+                        : "Wait for the queued command acknowledgement"
                 );
                 set_view_state("Agent is busy");
                 redraw();
             } else {
+                /* swkbd is modal, so reconnect afterward instead of timing out. */
+                network_push_stop();
                 SwkbdResult keyboard_result = SWKBD_NONE;
                 SwkbdButton button = read_prompt(&keyboard_result);
+                restart_push_link();
 
                 if (button == SWKBD_BUTTON_RIGHT) {
                     submit_text_capture(prompt);
@@ -1365,7 +1217,6 @@ int main(int argc, char **argv)
         }
 
         handle_scroll_input(keys_down, keys_held);
-        poll_events_if_due();
 
         present_frame();
     }

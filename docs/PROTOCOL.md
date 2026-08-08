@@ -64,7 +64,7 @@ HTTP keep-alive as the production remote transport.
 
 Do not turn this disposable endpoint into the production protocol by accident.
 
-## 4. Stage 1 transport
+## 4. Stage 1 HTTP fixture
 
 The local vertical slice uses persistent HTTP/1.1 connections:
 
@@ -96,8 +96,61 @@ ID returns the original acknowledgement without running the command twice.
 
 This is a local transport experiment. Protocol messages are independent from the
 transport and the remote path must later add standard authenticated encryption.
-Polling is not an input event from the user; it is the current development
-client asking whether the bridge has agent-to-3DS events available.
+Polling is not an input event from the user. It was the Stage 1 development
+client asking whether the bridge had agent-to-3DS events available. The HTTP
+routes remain as a tested fixture and audio path, but `0.1.2-stage1.5` no longer
+uses event polling or HTTP for text/approval/interrupt control.
+
+## 4.1 Stage 1.5 local pushed control
+
+The current 3DS build opens a separate development-only raw TCP connection on
+port 8081. Both sides set `TCP_NODELAY`. Each frame is one UTF-8 JSON object plus
+`\n`, with a hard 4 KiB frame/input limit. The existing event envelope remains
+the application payload; the transport adds only small wrappers.
+
+The client starts or resumes with its last successfully applied cursor:
+
+```json
+{"protocolVersion":1,"type":"connection.hello","sessionId":"ses_fake_local","after":12}
+```
+
+The bridge replies with a session snapshot and then pushes every retained event
+after that cursor:
+
+```json
+{"protocolVersion":1,"type":"connection.ready","session":{"sessionId":"ses_fake_local","state":"idle"},"lastSequence":12}
+{"protocolVersion":1,"type":"event","event":{"protocolVersion":1,"eventId":"evt_...","sequence":13,"sessionId":"ses_fake_local","type":"assistant.text.delta","createdAt":"...","payload":{"text":"Hello"}}}
+```
+
+Text, interruption, and approval commands share the connection:
+
+```json
+{"protocolVersion":1,"type":"command","commandId":"cmd_...","command":{"type":"capture.text","text":"run tests"}}
+{"protocolVersion":1,"type":"command","commandId":"cmd_...","command":{"type":"turn.interrupt"}}
+{"protocolVersion":1,"type":"command","commandId":"cmd_...","command":{"type":"approval.respond","approvalId":"apr_...","choice":"approve_once"}}
+```
+
+The bridge returns `command.ack` with the normal acknowledgement. The 3DS keeps
+at most one mutating command and retries the exact frame/ID after reconnect until
+it receives that acknowledgement. Bridge-side deduplication prevents a replayed
+accepted command from executing twice.
+
+After three seconds without inbound traffic, the 3DS sends a `ping`; the bridge
+returns `pong`. Eight seconds without any inbound frame causes the 3DS to close
+and reconnect. Retry delay starts at roughly 250 ms, doubles to a ten-second cap,
+and includes ±20 percent jitter. The bridge releases clients that send nothing
+for twelve seconds.
+
+If a cursor is expired or ahead after a bridge restart, the bridge sends
+`resync.required` with the current bounded session snapshot and closes the link.
+The 3DS visibly marks the output gap, applies the snapshot cursor, and reconnects.
+The event store retains at most 256 events and 128 KiB per session. Slow peers
+are handled by socket backpressure and cursor replay rather than an unbounded
+per-client queue.
+
+This raw TCP framing proves local push mechanics only. It is unauthenticated and
+unencrypted, must not be exposed to the internet, and does not settle WSS versus
+raw TLS for the self-hosted remote relay.
 
 ## 5. Envelope
 
@@ -135,8 +188,8 @@ requests only events after the last sequence it has successfully applied:
 GET /v1/events?sessionId=ses_fake_local&after=12&limit=8
 ```
 
-An empty poll has a zero-byte body. The bridge retains 256 events per session in
-Stage 1. If `after` is older than retained history, it returns
+An empty poll has a zero-byte body. The bridge retains at most 256 events and
+128 KiB per session. If `after` is older than retained history, it returns
 `EVENT_CURSOR_EXPIRED`. If it is newer than the latest event—for example, after
 an in-memory bridge restart—it returns `EVENT_CURSOR_AHEAD`. The client then
 fetches the current session snapshot, advances to its `lastSequence`, and
@@ -267,7 +320,8 @@ Candidates must be tested on actual hardware.
 The planned sequence is:
 
 1. keep application-level sequences, command IDs, replay, and deduplication;
-2. prove local pushed events, heartbeat, reconnect with jitter, and cursor resume;
+2. physically prove the implemented local pushed events, heartbeat, reconnect
+   with jitter, and cursor resume;
 3. run R-010 for TLS, DNS, clock/certificate, memory, and handshake measurements;
 4. decide framing after those results.
 

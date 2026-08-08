@@ -87,6 +87,39 @@ agent adapters. Agent-specific objects still stop at the adapter boundary.
 
 This does not require the relay or every future component to use TypeScript.
 
+### D-014 — New and resumed agent sessions
+
+**Status:** Accepted
+
+The product supports both starting a new coding-agent session and resuming an
+existing one. The first Codex adapter should expose both operations while the
+desktop bridge remains authoritative over workspace and policy choices.
+
+### D-015 — Review voice transcripts before sending
+
+**Status:** Accepted
+
+Releasing push-to-talk uploads and transcribes the capture, then shows the
+transcript on the 3DS. A separate explicit button sends it to the agent. The
+user can cancel and may edit through the native keyboard where practical.
+This is the accepted Stage 3 target; the current fake adapter still starts a
+mock turn immediately after audio upload and does not yet implement it.
+
+### D-016 — Self-hosted relay first
+
+**Status:** Accepted
+
+The first remote relay is self-hosted. Its protocol must not prevent a later
+hosted service, but an official public relay is not required for the first
+functional product.
+
+### D-017 — Photo included; stylus sketch deferred
+
+**Status:** Accepted for the current product scope
+
+Photo capture and attachment are included after the core agent loop. Stylus
+sketch capture is outside the current goal and may be revisited later.
+
 ---
 
 ## Proposed
@@ -98,26 +131,6 @@ This does not require the relay or every future component to use TypeScript.
 Target Old 3DS compatibility unless measured performance makes a feature unreasonable.
 
 Optimize for New 3DS only where explicitly documented.
-
-### D-P03 — Session creation
-
-**Question:**
-Can a user start a new coding-agent session from 3gent, or only attach to existing sessions?
-
-### D-P04 — Voice send behavior
-
-**Question:**
-On push-to-talk release:
-- send immediately;
-- show transcript first;
-- configurable behavior?
-
-### D-P05 — Relay model
-
-**Question:**
-- official hosted relay;
-- self-host-only;
-- both?
 
 ### D-P06 — Project license
 
@@ -176,14 +189,18 @@ user commands can cancel an in-flight background event read. This is a required
 property of any later transport, but it still does not accept the production
 remote transport or the final number of connections.
 
+Version `0.1.2-stage1.5` warms only the independent HTTP audio connection and
+opens the pushed control link asynchronously. The legacy HTTP command socket is
+retained as fixture/fallback code but is no longer pre-opened by the app.
+
 ### D-P10 — Stage 1 event delivery
 
 **Status:** Proposed / local vertical-slice experiment
 
-Stage 1 uses persistent HTTP/1.1 for bounded commands and cursor-based polling
-for newline-delimited JSON event batches. Per-session sequence numbers allow a
-client to request events after its last applied cursor and replay a bounded
-history after a short disconnect.
+The historical Stage 1 client used persistent HTTP/1.1 for bounded commands and
+cursor-based polling for newline-delimited JSON event batches. Per-session
+sequence numbers allow a client to request events after its last applied cursor
+and replay a bounded history after a short disconnect.
 
 Version `0.1.1-stage1` makes those checks asynchronous and adaptive: about 100 ms
 while working, 250 ms while waiting for approval, one second while idle, and an
@@ -195,6 +212,17 @@ hardware and preserves cursor replay while the fake agent runs. Polling remains
 a temporary local mechanism: its bounded batch/2 KiB response ceiling cannot be
 assumed to sustain real adapter event rates. Pushed events are the next local
 transport experiment.
+
+Version `0.1.2-stage1.5` implements that experiment using a separate
+development-only raw TCP control port with bounded newline-delimited JSON. The
+3DS sends text captures and controls on the same persistent link that receives
+acknowledgements, agent events, errors, and heartbeat replies. It resumes from
+the last applied event cursor, retries one unacknowledged command with the same
+ID, and reconnects with capped jittered backoff. The proven HTTP audio upload
+remains separate.
+
+This local framing is reversible and does not decide D-P11. Host tests pass;
+physical reconnect, sleep, Wi-Fi, latency, and no-freeze evidence is pending.
 
 ### D-P11 — Secure bidirectional remote transport
 

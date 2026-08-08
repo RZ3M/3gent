@@ -75,14 +75,14 @@ Default:
 1. Hold push-to-talk.
 2. Visible recording timer + level/activity indicator.
 3. Release.
-4. Send automatically OR review depending on product decision.
-5. Upload progress.
-6. Transcription state.
-7. Agent working state.
+4. Upload progress.
+5. Transcription state.
+6. Show the transcript for review.
+7. Explicitly send, edit with the native keyboard, or cancel.
+8. Agent working state.
 
-Pending decision:
-- auto-send after release;
-- or show transcript/review first.
+Review-before-send is the accepted default; voice capture never silently becomes
+an agent prompt immediately after release.
 
 ## 6. Text UX
 
@@ -119,7 +119,7 @@ Bottom:
 
 Exact buttons are pending usability testing.
 
-### Stage 1 hardware mapping
+### Stage 1.5 hardware mapping
 
 The local fake-agent slice deliberately uses a small mapping while the event
 model is tested:
@@ -150,9 +150,9 @@ Future photo capture:
 - optional prompt;
 - send.
 
-## 9. Stylus capture
+## 9. Stylus capture (outside the current goal)
 
-Future sketch mode:
+If revisited later, a sketch mode could use:
 - full bottom-screen canvas;
 - clear;
 - undo;
