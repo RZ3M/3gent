@@ -23,6 +23,93 @@
 #define SOC_BUFFER_SIZE 0x100000
 #define HTTP_REQUEST_HEADER_CAPACITY 1024
 #define HTTP_RESPONSE_CAPACITY 4096
+#define HTTP_BODY_CAPACITY 2048
+#define CONTROL_BODY_CAPACITY 4096
+#define NETWORK_ERROR_CAPACITY 160
+#define NETWORK_HOST_CAPACITY 64
+#define AUDIO_CHUNK_CAPACITY 8192
+#define AUDIO_OUTPUT_CAPACITY (AUDIO_CHUNK_CAPACITY + 32)
+
+typedef void (*NetworkProgressCallback)(
+    const char *response,
+    void *user_data
+);
+
+typedef enum {
+    ASYNC_STEP_PENDING = 0,
+    ASYNC_STEP_PROGRESSED,
+    ASYNC_STEP_COMPLETE,
+    ASYNC_STEP_FAILED,
+} AsyncStepResult;
+
+typedef enum {
+    ASYNC_CONNECT_FAILED = 0,
+    ASYNC_CONNECT_IN_PROGRESS,
+    ASYNC_CONNECT_COMPLETE,
+} AsyncConnectResult;
+
+typedef struct {
+    char raw[HTTP_RESPONSE_CAPACITY + 1];
+    char body[HTTP_BODY_CAPACITY];
+    size_t total_size;
+    size_t body_offset;
+    size_t expected_body_size;
+    unsigned int status_code;
+    bool headers_parsed;
+    bool reusable;
+} AsyncHttpResponse;
+
+typedef enum {
+    CONTROL_PHASE_IDLE = 0,
+    CONTROL_PHASE_CONNECTING,
+    CONTROL_PHASE_SENDING_HEADER,
+    CONTROL_PHASE_SENDING_BODY,
+    CONTROL_PHASE_RECEIVING,
+    CONTROL_PHASE_SUCCEEDED,
+    CONTROL_PHASE_FAILED,
+} ControlPhase;
+
+typedef struct {
+    ControlPhase phase;
+    char host[NETWORK_HOST_CAPACITY];
+    unsigned short port;
+    char request_header[HTTP_REQUEST_HEADER_CAPACITY];
+    size_t request_header_size;
+    size_t request_header_offset;
+    char request_body[CONTROL_BODY_CAPACITY];
+    size_t request_body_size;
+    size_t request_body_offset;
+    AsyncHttpResponse response;
+    char error[NETWORK_ERROR_CAPACITY];
+    u64 deadline_ms;
+} ControlTransaction;
+
+typedef enum {
+    AUDIO_PHASE_IDLE = 0,
+    AUDIO_PHASE_CONNECTING,
+    AUDIO_PHASE_SENDING_HEADER,
+    AUDIO_PHASE_STREAMING,
+    AUDIO_PHASE_SENDING_END,
+    AUDIO_PHASE_RECEIVING,
+    AUDIO_PHASE_SUCCEEDED,
+    AUDIO_PHASE_FAILED,
+} AudioPhase;
+
+typedef struct {
+    AudioPhase phase;
+    char host[NETWORK_HOST_CAPACITY];
+    unsigned short port;
+    char request_header[HTTP_REQUEST_HEADER_CAPACITY];
+    size_t request_header_size;
+    size_t request_header_offset;
+    char output[AUDIO_OUTPUT_CAPACITY];
+    size_t output_size;
+    size_t output_offset;
+    bool finish_requested;
+    AsyncHttpResponse response;
+    char error[NETWORK_ERROR_CAPACITY];
+    u64 deadline_ms;
+} AudioTransaction;
 
 static u32 *soc_buffer = NULL;
 static bool soc_ready = false;
@@ -30,6 +117,8 @@ static int control_socket = -1;
 static int prepared_audio_socket = -1;
 static int audio_stream_socket = -1;
 static u32 next_command_id = 1;
+static ControlTransaction control_transaction;
+static AudioTransaction audio_transaction;
 
 static void make_command_id(char *command_id, size_t capacity)
 {
@@ -115,6 +204,7 @@ bool network_start(char *error, size_t error_capacity)
 
 void network_stop(void)
 {
+    network_control_cancel();
     network_audio_stream_abort();
     close_socket(&prepared_audio_socket);
     close_socket(&control_socket);
@@ -660,54 +750,321 @@ unsigned int network_warm_connection_count(void)
     return count;
 }
 
-bool network_post_bytes(
+static void reset_async_response(AsyncHttpResponse *response)
+{
+    memset(response, 0, sizeof(*response));
+    response->body[0] = '\0';
+}
+
+static bool deadline_expired(u64 deadline_ms)
+{
+    return deadline_ms != 0 && osGetTime() >= deadline_ms;
+}
+
+static u64 new_network_deadline(void)
+{
+    return osGetTime() + (u64)THREEGENT_NETWORK_TIMEOUT_SECONDS * 1000U;
+}
+
+static int socket_ready_now(
+    int socket_fd,
+    bool wait_for_write,
+    char *error,
+    size_t error_capacity
+)
+{
+    fd_set read_set;
+    fd_set write_set;
+    FD_ZERO(&read_set);
+    FD_ZERO(&write_set);
+    if (wait_for_write) {
+        FD_SET(socket_fd, &write_set);
+    } else {
+        FD_SET(socket_fd, &read_set);
+    }
+
+    struct timeval timeout = {.tv_sec = 0, .tv_usec = 0};
+    int result = select(
+        socket_fd + 1,
+        wait_for_write ? NULL : &read_set,
+        wait_for_write ? &write_set : NULL,
+        NULL,
+        &timeout
+    );
+    if (result < 0) {
+        set_errno_error(error, error_capacity, "select", errno);
+        return -1;
+    }
+    return result > 0 ? 1 : 0;
+}
+
+static AsyncConnectResult start_async_server_socket(
+    const char *host,
+    unsigned short port,
+    int *socket_fd,
+    char *error,
+    size_t error_capacity
+)
+{
+    struct sockaddr_in server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    if (inet_pton(AF_INET, host, &server_address.sin_addr) != 1) {
+        set_error(error, error_capacity, "server host must be a numeric IPv4 address");
+        return ASYNC_CONNECT_FAILED;
+    }
+
+    int new_socket = socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+    if (new_socket < 0) {
+        set_errno_error(error, error_capacity, "socket", errno);
+        return ASYNC_CONNECT_FAILED;
+    }
+
+    int flags = fcntl(new_socket, F_GETFL, 0);
+    if (flags < 0 || fcntl(new_socket, F_SETFL, flags | O_NONBLOCK) < 0) {
+        set_errno_error(error, error_capacity, "fcntl", errno);
+        close(new_socket);
+        return ASYNC_CONNECT_FAILED;
+    }
+
+    int no_delay = 1;
+    if (setsockopt(
+            new_socket,
+            SOL_TCP,
+            TCP_NODELAY,
+            &no_delay,
+            sizeof(no_delay)
+        ) < 0) {
+        set_errno_error(error, error_capacity, "TCP_NODELAY", errno);
+        close(new_socket);
+        return ASYNC_CONNECT_FAILED;
+    }
+
+    int result = connect(
+        new_socket,
+        (const struct sockaddr *)&server_address,
+        sizeof(server_address)
+    );
+    if (result < 0 && errno != EINPROGRESS) {
+        set_errno_error(error, error_capacity, "connect", errno);
+        close(new_socket);
+        return ASYNC_CONNECT_FAILED;
+    }
+
+    *socket_fd = new_socket;
+    return result == 0
+        ? ASYNC_CONNECT_COMPLETE
+        : ASYNC_CONNECT_IN_PROGRESS;
+}
+
+static AsyncStepResult send_bytes_step(
+    int socket_fd,
+    const char *data,
+    size_t size,
+    size_t *offset,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (*offset >= size) {
+        return ASYNC_STEP_COMPLETE;
+    }
+
+    ssize_t sent = send(socket_fd, data + *offset, size - *offset, 0);
+    if (sent > 0) {
+        *offset += (size_t)sent;
+        return *offset == size
+            ? ASYNC_STEP_COMPLETE
+            : ASYNC_STEP_PROGRESSED;
+    }
+    if (sent == 0) {
+        set_error(error, error_capacity, "connection closed during send");
+        return ASYNC_STEP_FAILED;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        return ASYNC_STEP_PENDING;
+    }
+    set_errno_error(error, error_capacity, "send", errno);
+    return ASYNC_STEP_FAILED;
+}
+
+static AsyncStepResult receive_http_step(
+    int socket_fd,
+    AsyncHttpResponse *response,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (response->total_size >= HTTP_RESPONSE_CAPACITY) {
+        set_error(error, error_capacity, "HTTP response exceeded the raw buffer");
+        return ASYNC_STEP_FAILED;
+    }
+
+    ssize_t received = recv(
+        socket_fd,
+        response->raw + response->total_size,
+        HTTP_RESPONSE_CAPACITY - response->total_size,
+        0
+    );
+    if (received == 0) {
+        set_error(error, error_capacity, "connection closed during receive");
+        return ASYNC_STEP_FAILED;
+    }
+    if (received < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+            return ASYNC_STEP_PENDING;
+        }
+        set_errno_error(error, error_capacity, "receive", errno);
+        return ASYNC_STEP_FAILED;
+    }
+
+    response->total_size += (size_t)received;
+    response->raw[response->total_size] = '\0';
+
+    if (!response->headers_parsed) {
+        char *header_end = strstr(response->raw, "\r\n\r\n");
+        if (header_end == NULL) {
+            return response->total_size == HTTP_RESPONSE_CAPACITY
+                ? ASYNC_STEP_FAILED
+                : ASYNC_STEP_PROGRESSED;
+        }
+
+        unsigned int http_major = 0;
+        unsigned int http_minor = 0;
+        if (sscanf(
+                response->raw,
+                "HTTP/%u.%u %u",
+                &http_major,
+                &http_minor,
+                &response->status_code
+            ) != 3) {
+            set_error(error, error_capacity, "invalid HTTP response");
+            return ASYNC_STEP_FAILED;
+        }
+
+        response->reusable = http_major > 1
+            || (http_major == 1 && http_minor >= 1);
+        if (strstr(response->raw, "\r\nConnection: close") != NULL) {
+            response->reusable = false;
+        } else if (strstr(
+                response->raw,
+                "\r\nConnection: keep-alive"
+            ) != NULL) {
+            response->reusable = true;
+        }
+
+        char *content_length = strstr(response->raw, "\r\nContent-Length:");
+        unsigned long parsed_length = 0;
+        if (content_length == NULL || sscanf(
+                content_length,
+                "\r\nContent-Length: %lu",
+                &parsed_length
+            ) != 1) {
+            set_error(error, error_capacity, "HTTP response requires Content-Length");
+            return ASYNC_STEP_FAILED;
+        }
+        if (parsed_length >= sizeof(response->body)) {
+            set_error(error, error_capacity, "response exceeded the bounded buffer");
+            return ASYNC_STEP_FAILED;
+        }
+
+        response->expected_body_size = (size_t)parsed_length;
+        response->body_offset = (size_t)(header_end - response->raw) + 4;
+        response->headers_parsed = true;
+    }
+
+    size_t available_body_size = response->total_size - response->body_offset;
+    if (available_body_size > response->expected_body_size) {
+        set_error(error, error_capacity, "HTTP response exceeded Content-Length");
+        return ASYNC_STEP_FAILED;
+    }
+    if (available_body_size == response->expected_body_size) {
+        memcpy(
+            response->body,
+            response->raw + response->body_offset,
+            available_body_size
+        );
+        response->body[available_body_size] = '\0';
+        return ASYNC_STEP_COMPLETE;
+    }
+    return ASYNC_STEP_PROGRESSED;
+}
+
+static void fail_control(const char *fallback_message)
+{
+    if (control_transaction.error[0] == '\0') {
+        set_error(
+            control_transaction.error,
+            sizeof(control_transaction.error),
+            fallback_message
+        );
+    }
+    close_socket(&control_socket);
+    control_transaction.phase = CONTROL_PHASE_FAILED;
+    control_transaction.deadline_ms = 0;
+}
+
+static bool begin_control_request(
     const char *host,
     unsigned short port,
     const char *path,
+    const char *method,
     const char *content_type,
     const void *body,
     size_t body_size,
-    char *response,
-    size_t response_capacity,
     char *error,
-    size_t error_capacity,
-    NetworkProgressCallback progress_callback,
-    void *progress_user_data
+    size_t error_capacity
 )
 {
     if (!soc_ready) {
         set_error(error, error_capacity, "network service is not initialized");
         return false;
     }
-    if (host == NULL || path == NULL || path[0] != '/'
-        || content_type == NULL || (body == NULL && body_size != 0)) {
-        set_error(error, error_capacity, "invalid network request");
+    if (control_transaction.phase != CONTROL_PHASE_IDLE) {
+        set_error(error, error_capacity, "control request is already active");
+        return false;
+    }
+    if (host == NULL || strlen(host) >= sizeof(control_transaction.host)
+        || path == NULL || path[0] != '/' || method == NULL
+        || (body == NULL && body_size != 0)
+        || body_size > sizeof(control_transaction.request_body)) {
+        set_error(error, error_capacity, "invalid or oversized control request");
         return false;
     }
 
-    if (control_socket < 0) {
-        control_socket = open_server_socket(
-            host,
-            port,
-            error,
-            error_capacity
-        );
-        if (control_socket < 0) {
-            return false;
-        }
+    memset(&control_transaction, 0, sizeof(control_transaction));
+    snprintf(control_transaction.host, sizeof(control_transaction.host), "%s", host);
+    control_transaction.port = port;
+    if (body_size > 0) {
+        memcpy(control_transaction.request_body, body, body_size);
     }
+    control_transaction.request_body_size = body_size;
+    reset_async_response(&control_transaction.response);
 
-    int socket_fd = control_socket;
-    bool success = false;
-    bool reusable = false;
-    char command_id[48];
-    make_command_id(command_id, sizeof(command_id));
-
-    do {
-        char request_header[HTTP_REQUEST_HEADER_CAPACITY];
-        int request_size = snprintf(
-            request_header,
-            sizeof(request_header),
+    int request_size = 0;
+    if (strcmp(method, "GET") == 0) {
+        request_size = snprintf(
+            control_transaction.request_header,
+            sizeof(control_transaction.request_header),
+            "GET %s HTTP/1.1\r\n"
+            "Host: %s:%u\r\n"
+            "User-Agent: 3gent/%s\r\n"
+            "X-3gent-Protocol-Version: %u\r\n"
+            "Connection: keep-alive\r\n"
+            "\r\n",
+            path,
+            host,
+            (unsigned int)port,
+            THREEGENT_APP_VERSION,
+            THREEGENT_PROTOCOL_VERSION
+        );
+    } else {
+        char command_id[48];
+        make_command_id(command_id, sizeof(command_id));
+        request_size = snprintf(
+            control_transaction.request_header,
+            sizeof(control_transaction.request_header),
             "POST %s HTTP/1.1\r\n"
             "Host: %s:%u\r\n"
             "User-Agent: 3gent/%s\r\n"
@@ -726,167 +1083,271 @@ bool network_post_bytes(
             content_type,
             (unsigned int)body_size
         );
-
-        if (request_size < 0
-            || (size_t)request_size >= sizeof(request_header)) {
-            set_error(
-                error,
-                error_capacity,
-                "HTTP request header exceeded the bounded buffer"
-            );
-            break;
-        }
-
-        if (!send_all(
-                socket_fd,
-                request_header,
-                (size_t)request_size,
-                error,
-                error_capacity
-            )) {
-            break;
-        }
-
-        if (body_size > 0 && !send_all(
-                socket_fd,
-                (const char *)body,
-                body_size,
-                error,
-                error_capacity
-            )) {
-            break;
-        }
-
-        if (!read_http_response(
-                socket_fd,
-                response,
-                response_capacity,
-                error,
-                error_capacity,
-                progress_callback,
-                progress_user_data,
-                &reusable
-            )) {
-            break;
-        }
-
-        success = true;
-    } while (false);
-
-    if (!success || !reusable) {
-        close_socket(&control_socket);
     }
-    return success;
+    if (request_size < 0
+        || (size_t)request_size >= sizeof(control_transaction.request_header)) {
+        memset(&control_transaction, 0, sizeof(control_transaction));
+        set_error(error, error_capacity, "control request header exceeded its buffer");
+        return false;
+    }
+    control_transaction.request_header_size = (size_t)request_size;
+    control_transaction.deadline_ms = new_network_deadline();
+
+    if (control_socket >= 0) {
+        control_transaction.phase = CONTROL_PHASE_SENDING_HEADER;
+        return true;
+    }
+
+    AsyncConnectResult connect_result = start_async_server_socket(
+        host,
+        port,
+        &control_socket,
+        control_transaction.error,
+        sizeof(control_transaction.error)
+    );
+    if (connect_result == ASYNC_CONNECT_FAILED) {
+        set_error(error, error_capacity, control_transaction.error);
+        memset(&control_transaction, 0, sizeof(control_transaction));
+        return false;
+    }
+    control_transaction.phase = connect_result == ASYNC_CONNECT_COMPLETE
+        ? CONTROL_PHASE_SENDING_HEADER
+        : CONTROL_PHASE_CONNECTING;
+    return true;
 }
 
-bool network_get_text(
+bool network_control_begin_get(
     const char *host,
     unsigned short port,
     const char *path,
-    char *response,
-    size_t response_capacity,
     char *error,
     size_t error_capacity
 )
 {
-    if (!soc_ready) {
-        set_error(error, error_capacity, "network service is not initialized");
-        return false;
-    }
-    if (host == NULL || path == NULL || path[0] != '/') {
-        set_error(error, error_capacity, "invalid GET request");
-        return false;
-    }
-    if (control_socket < 0) {
-        control_socket = open_server_socket(
-            host,
-            port,
-            error,
-            error_capacity
-        );
-        if (control_socket < 0) {
-            return false;
-        }
-    }
-
-    char request_header[HTTP_REQUEST_HEADER_CAPACITY];
-    int request_size = snprintf(
-        request_header,
-        sizeof(request_header),
-        "GET %s HTTP/1.1\r\n"
-        "Host: %s:%u\r\n"
-        "User-Agent: 3gent/%s\r\n"
-        "X-3gent-Protocol-Version: %u\r\n"
-        "Connection: keep-alive\r\n"
-        "\r\n",
-        path,
-        host,
-        (unsigned int)port,
-        THREEGENT_APP_VERSION,
-        THREEGENT_PROTOCOL_VERSION
-    );
-    bool reusable = false;
-    bool success = request_size >= 0
-        && (size_t)request_size < sizeof(request_header)
-        && send_all(
-            control_socket,
-            request_header,
-            (size_t)request_size,
-            error,
-            error_capacity
-        )
-        && read_http_response(
-            control_socket,
-            response,
-            response_capacity,
-            error,
-            error_capacity,
-            NULL,
-            NULL,
-            &reusable
-        );
-    if (request_size < 0
-        || (size_t)request_size >= sizeof(request_header)) {
-        set_error(error, error_capacity, "GET header exceeded bounded buffer");
-    }
-    if (!success || !reusable) {
-        close_socket(&control_socket);
-    }
-    return success;
-}
-
-bool network_post_text(
-    const char *host,
-    unsigned short port,
-    const char *path,
-    const char *message,
-    char *response,
-    size_t response_capacity,
-    char *error,
-    size_t error_capacity,
-    NetworkProgressCallback progress_callback,
-    void *progress_user_data
-)
-{
-    if (message == NULL) {
-        set_error(error, error_capacity, "invalid text request");
-        return false;
-    }
-
-    return network_post_bytes(
+    return begin_control_request(
         host,
         port,
         path,
-        "text/plain; charset=utf-8",
-        message,
-        strlen(message),
-        response,
-        response_capacity,
+        "GET",
+        NULL,
+        NULL,
+        0,
         error,
-        error_capacity,
-        progress_callback,
-        progress_user_data
+        error_capacity
     );
+}
+
+bool network_control_begin_post(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    const char *content_type,
+    const void *body,
+    size_t body_size,
+    char *error,
+    size_t error_capacity
+)
+{
+    if (content_type == NULL) {
+        set_error(error, error_capacity, "control content type is unavailable");
+        return false;
+    }
+    return begin_control_request(
+        host,
+        port,
+        path,
+        "POST",
+        content_type,
+        body,
+        body_size,
+        error,
+        error_capacity
+    );
+}
+
+static void pump_control(void)
+{
+    for (unsigned int transitions = 0; transitions < 4; transitions++) {
+        if (control_transaction.phase == CONTROL_PHASE_IDLE
+            || control_transaction.phase == CONTROL_PHASE_SUCCEEDED
+            || control_transaction.phase == CONTROL_PHASE_FAILED) {
+            return;
+        }
+        if (deadline_expired(control_transaction.deadline_ms)) {
+            set_error(
+                control_transaction.error,
+                sizeof(control_transaction.error),
+                "control request timed out"
+            );
+            fail_control("control request timed out");
+            return;
+        }
+
+        if (control_transaction.phase == CONTROL_PHASE_CONNECTING) {
+            int ready = socket_ready_now(
+                control_socket,
+                true,
+                control_transaction.error,
+                sizeof(control_transaction.error)
+            );
+            if (ready < 0) {
+                fail_control("control connect failed");
+                return;
+            }
+            if (ready == 0) {
+                return;
+            }
+            /* See connect_with_timeout(): SO_ERROR is unreliable on hardware. */
+            control_transaction.phase = CONTROL_PHASE_SENDING_HEADER;
+            control_transaction.deadline_ms = new_network_deadline();
+            continue;
+        }
+
+        if (control_transaction.phase == CONTROL_PHASE_SENDING_HEADER) {
+            AsyncStepResult step = send_bytes_step(
+                control_socket,
+                control_transaction.request_header,
+                control_transaction.request_header_size,
+                &control_transaction.request_header_offset,
+                control_transaction.error,
+                sizeof(control_transaction.error)
+            );
+            if (step == ASYNC_STEP_FAILED) {
+                fail_control("control header send failed");
+                return;
+            }
+            if (step == ASYNC_STEP_PENDING) {
+                return;
+            }
+            control_transaction.deadline_ms = new_network_deadline();
+            if (step == ASYNC_STEP_COMPLETE) {
+                control_transaction.phase = control_transaction.request_body_size > 0
+                    ? CONTROL_PHASE_SENDING_BODY
+                    : CONTROL_PHASE_RECEIVING;
+                continue;
+            }
+            return;
+        }
+
+        if (control_transaction.phase == CONTROL_PHASE_SENDING_BODY) {
+            AsyncStepResult step = send_bytes_step(
+                control_socket,
+                control_transaction.request_body,
+                control_transaction.request_body_size,
+                &control_transaction.request_body_offset,
+                control_transaction.error,
+                sizeof(control_transaction.error)
+            );
+            if (step == ASYNC_STEP_FAILED) {
+                fail_control("control body send failed");
+                return;
+            }
+            if (step == ASYNC_STEP_PENDING) {
+                return;
+            }
+            control_transaction.deadline_ms = new_network_deadline();
+            if (step == ASYNC_STEP_COMPLETE) {
+                control_transaction.phase = CONTROL_PHASE_RECEIVING;
+                continue;
+            }
+            return;
+        }
+
+        AsyncStepResult step = receive_http_step(
+            control_socket,
+            &control_transaction.response,
+            control_transaction.error,
+            sizeof(control_transaction.error)
+        );
+        if (step == ASYNC_STEP_FAILED) {
+            fail_control("control receive failed");
+            return;
+        }
+        if (step == ASYNC_STEP_PENDING) {
+            return;
+        }
+        control_transaction.deadline_ms = new_network_deadline();
+        if (step != ASYNC_STEP_COMPLETE) {
+            return;
+        }
+
+        unsigned int status = control_transaction.response.status_code;
+        if (status < 200 || status >= 300) {
+            snprintf(
+                control_transaction.error,
+                sizeof(control_transaction.error),
+                "server returned HTTP %u",
+                status
+            );
+            fail_control("control request failed");
+            return;
+        }
+        if (!control_transaction.response.reusable) {
+            close_socket(&control_socket);
+        }
+        control_transaction.phase = CONTROL_PHASE_SUCCEEDED;
+        control_transaction.deadline_ms = 0;
+        return;
+    }
+}
+
+NetworkOperationStatus network_control_status(void)
+{
+    switch (control_transaction.phase) {
+        case CONTROL_PHASE_IDLE:
+            return NETWORK_OPERATION_IDLE;
+        case CONTROL_PHASE_SUCCEEDED:
+            return NETWORK_OPERATION_SUCCEEDED;
+        case CONTROL_PHASE_FAILED:
+            return NETWORK_OPERATION_FAILED;
+        default:
+            return NETWORK_OPERATION_IN_PROGRESS;
+    }
+}
+
+unsigned int network_control_http_status(void)
+{
+    return control_transaction.response.status_code;
+}
+
+const char *network_control_response(void)
+{
+    return control_transaction.response.body;
+}
+
+const char *network_control_error(void)
+{
+    return control_transaction.error;
+}
+
+void network_control_consume(void)
+{
+    if (control_transaction.phase == CONTROL_PHASE_SUCCEEDED
+        || control_transaction.phase == CONTROL_PHASE_FAILED) {
+        memset(&control_transaction, 0, sizeof(control_transaction));
+    }
+}
+
+void network_control_cancel(void)
+{
+    if (network_control_status() == NETWORK_OPERATION_IN_PROGRESS) {
+        close_socket(&control_socket);
+    }
+    memset(&control_transaction, 0, sizeof(control_transaction));
+}
+
+static void fail_audio(const char *fallback_message)
+{
+    if (audio_transaction.error[0] == '\0') {
+        set_error(
+            audio_transaction.error,
+            sizeof(audio_transaction.error),
+            fallback_message
+        );
+    }
+    close_socket(&audio_stream_socket);
+    audio_transaction.phase = AUDIO_PHASE_FAILED;
+    audio_transaction.deadline_ms = 0;
 }
 
 bool network_audio_stream_begin(
@@ -901,35 +1362,26 @@ bool network_audio_stream_begin(
         set_error(error, error_capacity, "network service is not initialized");
         return false;
     }
-    if (audio_stream_socket >= 0) {
+    if (audio_transaction.phase != AUDIO_PHASE_IDLE) {
         set_error(error, error_capacity, "audio stream is already active");
         return false;
     }
-    if (host == NULL || path == NULL || path[0] != '/') {
+    if (host == NULL || strlen(host) >= sizeof(audio_transaction.host)
+        || path == NULL || path[0] != '/') {
         set_error(error, error_capacity, "invalid audio stream request");
         return false;
     }
 
-    int socket_fd = prepared_audio_socket;
-    prepared_audio_socket = -1;
-    if (socket_fd < 0) {
-        socket_fd = open_server_socket(
-            host,
-            port,
-            error,
-            error_capacity
-        );
-        if (socket_fd < 0) {
-            return false;
-        }
-    }
+    memset(&audio_transaction, 0, sizeof(audio_transaction));
+    snprintf(audio_transaction.host, sizeof(audio_transaction.host), "%s", host);
+    audio_transaction.port = port;
+    reset_async_response(&audio_transaction.response);
 
-    char request_header[HTTP_REQUEST_HEADER_CAPACITY];
     char command_id[48];
     make_command_id(command_id, sizeof(command_id));
     int request_size = snprintf(
-        request_header,
-        sizeof(request_header),
+        audio_transaction.request_header,
+        sizeof(audio_transaction.request_header),
         "POST %s HTTP/1.1\r\n"
         "Host: %s:%u\r\n"
         "User-Agent: 3gent/%s\r\n"
@@ -948,28 +1400,44 @@ bool network_audio_stream_begin(
         command_id
     );
     if (request_size < 0
-        || (size_t)request_size >= sizeof(request_header)
-        || !send_all(
-            socket_fd,
-            request_header,
-            (size_t)request_size,
-            error,
-            error_capacity
-        )) {
-        if (request_size >= 0
-            && (size_t)request_size >= sizeof(request_header)) {
-            set_error(
-                error,
-                error_capacity,
-                "audio stream header exceeded the bounded buffer"
-            );
-        }
-        close(socket_fd);
+        || (size_t)request_size >= sizeof(audio_transaction.request_header)) {
+        memset(&audio_transaction, 0, sizeof(audio_transaction));
+        set_error(error, error_capacity, "audio stream header exceeded its buffer");
         return false;
     }
+    audio_transaction.request_header_size = (size_t)request_size;
+    audio_transaction.deadline_ms = new_network_deadline();
 
-    audio_stream_socket = socket_fd;
+    audio_stream_socket = prepared_audio_socket;
+    prepared_audio_socket = -1;
+    if (audio_stream_socket >= 0) {
+        audio_transaction.phase = AUDIO_PHASE_SENDING_HEADER;
+        return true;
+    }
+
+    AsyncConnectResult connect_result = start_async_server_socket(
+        host,
+        port,
+        &audio_stream_socket,
+        audio_transaction.error,
+        sizeof(audio_transaction.error)
+    );
+    if (connect_result == ASYNC_CONNECT_FAILED) {
+        set_error(error, error_capacity, audio_transaction.error);
+        memset(&audio_transaction, 0, sizeof(audio_transaction));
+        return false;
+    }
+    audio_transaction.phase = connect_result == ASYNC_CONNECT_COMPLETE
+        ? AUDIO_PHASE_SENDING_HEADER
+        : AUDIO_PHASE_CONNECTING;
     return true;
+}
+
+bool network_audio_stream_can_write(void)
+{
+    return audio_transaction.phase == AUDIO_PHASE_STREAMING
+        && audio_transaction.output_size == 0
+        && !audio_transaction.finish_requested;
 }
 
 bool network_audio_stream_write(
@@ -979,100 +1447,260 @@ bool network_audio_stream_write(
     size_t error_capacity
 )
 {
-    if (audio_stream_socket < 0) {
-        set_error(error, error_capacity, "audio stream is not active");
+    if (!network_audio_stream_can_write()) {
+        set_error(error, error_capacity, "audio network queue is busy");
         return false;
     }
-    if (data == NULL || size == 0) {
-        set_error(error, error_capacity, "audio stream chunk is empty");
+    if (data == NULL || size == 0 || size > AUDIO_CHUNK_CAPACITY) {
+        set_error(error, error_capacity, "audio stream chunk is invalid");
         return false;
     }
 
-    char chunk_header[24];
     int header_size = snprintf(
-        chunk_header,
-        sizeof(chunk_header),
+        audio_transaction.output,
+        sizeof(audio_transaction.output),
         "%x\r\n",
         (unsigned int)size
     );
-    if (header_size < 0 || (size_t)header_size >= sizeof(chunk_header)
-        || !send_all(
-            audio_stream_socket,
-            chunk_header,
-            (size_t)header_size,
-            error,
-            error_capacity
-        )
-        || !send_all(
-            audio_stream_socket,
-            (const char *)data,
-            size,
-            error,
-            error_capacity
-        )
-        || !send_all(
-            audio_stream_socket,
-            "\r\n",
-            2,
-            error,
-            error_capacity
-        )) {
-        network_audio_stream_abort();
+    if (header_size < 0
+        || (size_t)header_size + size + 2 > sizeof(audio_transaction.output)) {
+        set_error(error, error_capacity, "audio stream chunk exceeded its buffer");
         return false;
     }
-
+    memcpy(audio_transaction.output + header_size, data, size);
+    memcpy(audio_transaction.output + header_size + size, "\r\n", 2);
+    audio_transaction.output_size = (size_t)header_size + size + 2;
+    audio_transaction.output_offset = 0;
+    audio_transaction.deadline_ms = new_network_deadline();
     return true;
 }
 
-bool network_audio_stream_finish(
-    char *response,
-    size_t response_capacity,
-    char *error,
-    size_t error_capacity
-)
+bool network_audio_stream_is_ready(void)
 {
-    if (audio_stream_socket < 0) {
+    return audio_transaction.phase == AUDIO_PHASE_STREAMING;
+}
+
+bool network_audio_stream_finish(char *error, size_t error_capacity)
+{
+    NetworkOperationStatus status = network_audio_stream_status();
+    if (status != NETWORK_OPERATION_IN_PROGRESS) {
         set_error(error, error_capacity, "audio stream is not active");
         return false;
     }
+    audio_transaction.finish_requested = true;
+    return true;
+}
 
-    int socket_fd = audio_stream_socket;
-    bool success = send_all(
-        socket_fd,
-        "0\r\n\r\n",
-        5,
-        error,
-        error_capacity
-    );
-    if (success) {
-        bool reusable = false;
-        success = read_http_response(
-            socket_fd,
-            response,
-            response_capacity,
-            error,
-            error_capacity,
-            NULL,
-            NULL,
-            &reusable
-        );
-        if (success && reusable) {
-            prepared_audio_socket = socket_fd;
-            socket_fd = -1;
+static void pump_audio(void)
+{
+    for (unsigned int transitions = 0; transitions < 4; transitions++) {
+        if (audio_transaction.phase == AUDIO_PHASE_IDLE
+            || audio_transaction.phase == AUDIO_PHASE_SUCCEEDED
+            || audio_transaction.phase == AUDIO_PHASE_FAILED) {
+            return;
         }
-    }
 
-    if (socket_fd >= 0) {
-        close(socket_fd);
+        bool requires_deadline = audio_transaction.phase != AUDIO_PHASE_STREAMING
+            || audio_transaction.output_size > 0
+            || audio_transaction.finish_requested;
+        if (requires_deadline && deadline_expired(audio_transaction.deadline_ms)) {
+            set_error(
+                audio_transaction.error,
+                sizeof(audio_transaction.error),
+                "audio stream timed out"
+            );
+            fail_audio("audio stream timed out");
+            return;
+        }
+
+        if (audio_transaction.phase == AUDIO_PHASE_CONNECTING) {
+            int ready = socket_ready_now(
+                audio_stream_socket,
+                true,
+                audio_transaction.error,
+                sizeof(audio_transaction.error)
+            );
+            if (ready < 0) {
+                fail_audio("audio connect failed");
+                return;
+            }
+            if (ready == 0) {
+                return;
+            }
+            audio_transaction.phase = AUDIO_PHASE_SENDING_HEADER;
+            audio_transaction.deadline_ms = new_network_deadline();
+            continue;
+        }
+
+        if (audio_transaction.phase == AUDIO_PHASE_SENDING_HEADER) {
+            AsyncStepResult step = send_bytes_step(
+                audio_stream_socket,
+                audio_transaction.request_header,
+                audio_transaction.request_header_size,
+                &audio_transaction.request_header_offset,
+                audio_transaction.error,
+                sizeof(audio_transaction.error)
+            );
+            if (step == ASYNC_STEP_FAILED) {
+                fail_audio("audio header send failed");
+                return;
+            }
+            if (step == ASYNC_STEP_PENDING) {
+                return;
+            }
+            audio_transaction.deadline_ms = new_network_deadline();
+            if (step == ASYNC_STEP_COMPLETE) {
+                audio_transaction.phase = AUDIO_PHASE_STREAMING;
+                continue;
+            }
+            return;
+        }
+
+        if (audio_transaction.phase == AUDIO_PHASE_STREAMING) {
+            if (audio_transaction.output_size > 0) {
+                AsyncStepResult step = send_bytes_step(
+                    audio_stream_socket,
+                    audio_transaction.output,
+                    audio_transaction.output_size,
+                    &audio_transaction.output_offset,
+                    audio_transaction.error,
+                    sizeof(audio_transaction.error)
+                );
+                if (step == ASYNC_STEP_FAILED) {
+                    fail_audio("audio chunk send failed");
+                    return;
+                }
+                if (step == ASYNC_STEP_PENDING) {
+                    return;
+                }
+                audio_transaction.deadline_ms = new_network_deadline();
+                if (step == ASYNC_STEP_COMPLETE) {
+                    audio_transaction.output_size = 0;
+                    audio_transaction.output_offset = 0;
+                    continue;
+                }
+                return;
+            }
+            if (!audio_transaction.finish_requested) {
+                audio_transaction.deadline_ms = 0;
+                return;
+            }
+            memcpy(audio_transaction.output, "0\r\n\r\n", 5);
+            audio_transaction.output_size = 5;
+            audio_transaction.output_offset = 0;
+            audio_transaction.phase = AUDIO_PHASE_SENDING_END;
+            audio_transaction.deadline_ms = new_network_deadline();
+            continue;
+        }
+
+        if (audio_transaction.phase == AUDIO_PHASE_SENDING_END) {
+            AsyncStepResult step = send_bytes_step(
+                audio_stream_socket,
+                audio_transaction.output,
+                audio_transaction.output_size,
+                &audio_transaction.output_offset,
+                audio_transaction.error,
+                sizeof(audio_transaction.error)
+            );
+            if (step == ASYNC_STEP_FAILED) {
+                fail_audio("audio final marker send failed");
+                return;
+            }
+            if (step == ASYNC_STEP_PENDING) {
+                return;
+            }
+            audio_transaction.deadline_ms = new_network_deadline();
+            if (step == ASYNC_STEP_COMPLETE) {
+                audio_transaction.output_size = 0;
+                audio_transaction.output_offset = 0;
+                reset_async_response(&audio_transaction.response);
+                audio_transaction.phase = AUDIO_PHASE_RECEIVING;
+                continue;
+            }
+            return;
+        }
+
+        AsyncStepResult step = receive_http_step(
+            audio_stream_socket,
+            &audio_transaction.response,
+            audio_transaction.error,
+            sizeof(audio_transaction.error)
+        );
+        if (step == ASYNC_STEP_FAILED) {
+            fail_audio("audio response failed");
+            return;
+        }
+        if (step == ASYNC_STEP_PENDING) {
+            return;
+        }
+        audio_transaction.deadline_ms = new_network_deadline();
+        if (step != ASYNC_STEP_COMPLETE) {
+            return;
+        }
+
+        unsigned int status = audio_transaction.response.status_code;
+        if (status < 200 || status >= 300) {
+            snprintf(
+                audio_transaction.error,
+                sizeof(audio_transaction.error),
+                "server returned HTTP %u",
+                status
+            );
+            fail_audio("audio stream failed");
+            return;
+        }
+        if (audio_transaction.response.reusable) {
+            prepared_audio_socket = audio_stream_socket;
+            audio_stream_socket = -1;
+        } else {
+            close_socket(&audio_stream_socket);
+        }
+        audio_transaction.phase = AUDIO_PHASE_SUCCEEDED;
+        audio_transaction.deadline_ms = 0;
+        return;
     }
-    audio_stream_socket = -1;
-    return success;
+}
+
+NetworkOperationStatus network_audio_stream_status(void)
+{
+    switch (audio_transaction.phase) {
+        case AUDIO_PHASE_IDLE:
+            return NETWORK_OPERATION_IDLE;
+        case AUDIO_PHASE_SUCCEEDED:
+            return NETWORK_OPERATION_SUCCEEDED;
+        case AUDIO_PHASE_FAILED:
+            return NETWORK_OPERATION_FAILED;
+        default:
+            return NETWORK_OPERATION_IN_PROGRESS;
+    }
+}
+
+const char *network_audio_stream_response(void)
+{
+    return audio_transaction.response.body;
+}
+
+const char *network_audio_stream_error(void)
+{
+    return audio_transaction.error;
+}
+
+void network_audio_stream_consume(void)
+{
+    if (audio_transaction.phase == AUDIO_PHASE_SUCCEEDED
+        || audio_transaction.phase == AUDIO_PHASE_FAILED) {
+        memset(&audio_transaction, 0, sizeof(audio_transaction));
+    }
 }
 
 void network_audio_stream_abort(void)
 {
-    if (audio_stream_socket >= 0) {
-        close(audio_stream_socket);
-        audio_stream_socket = -1;
-    }
+    close_socket(&audio_stream_socket);
+    memset(&audio_transaction, 0, sizeof(audio_transaction));
+}
+
+void network_pump(void)
+{
+    pump_control();
+    pump_audio();
 }

@@ -1,6 +1,6 @@
 # 3gent — Primary Research Sources
 
-**Last checked:** 2026-08-07
+**Last checked:** 2026-08-08
 
 Prefer these primary/official sources when implementation details conflict with memory, old tutorials, or random snippets.
 
@@ -29,6 +29,35 @@ Relevant example categories include:
 https://libctru.devkitpro.org/swkbd_8h.html
 
 Relevant functions include `swkbdInit` and `swkbdInputText`.
+
+### devkitPro 3DS curl package definition
+https://github.com/devkitPro/pacman-packages/blob/master/3ds/curl/PKGBUILD
+
+Version-sensitive findings checked on 2026-08-08:
+- package version 8.4.0-1;
+- threaded resolver and pthreads disabled;
+- no WebSocket enable flag;
+- SD-card CA bundle path configured.
+
+### devkitPro 3DS Mbed TLS package definition
+https://github.com/devkitPro/pacman-packages/blob/master/3ds/mbedtls/PKGBUILD
+
+Version-sensitive finding checked on 2026-08-08: package version 2.28.8-1.
+
+## Secure transport upstreams
+
+### curl 8.11.0 release notes
+https://curl.se/ch/8.11.0.html
+
+WebSocket support became official/non-experimental in curl 8.11.0. Do not infer
+production WebSocket support from the older 3DS curl package merely because its
+headers expose some related API.
+
+### Mbed TLS maintained branches
+https://github.com/Mbed-TLS/mbedtls/blob/development/BRANCHES.md
+
+As checked on 2026-08-08, upstream lists 3.6 and 4.1 as maintained LTS branches.
+Recheck this at implementation time.
 
 ## Nintendo network compatibility
 

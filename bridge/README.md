@@ -39,7 +39,10 @@ Verbose mode logs every request and response, exact text captures, approval JSON
 command acknowledgements, and complete event envelopes. Microphone PCM is shown
 as received chunk sizes and running byte totals rather than raw binary samples.
 Because the 3DS polls frequently, empty event polls are also logged and output is
-intentionally high-volume.
+intentionally high-volume. Client `0.1.1-stage1` adapts that cadence to roughly
+10 checks/second while an agent is working, 4/second while an approval is
+pending, and 1/second while idle. Those lines are bridge reads for outbound
+agent events, not unsolicited 3DS button input.
 
 Verbose logs can contain sensitive prompts, agent output, commands, paths, and
 future adapter content. Enable the flag only for deliberate local debugging and

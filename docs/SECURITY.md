@@ -106,8 +106,20 @@ Remote communication must use a standard, reviewed encryption approach.
 Important:
 - the 3DS is old hardware;
 - TLS/library compatibility must be tested;
+- Old 3DS handshake time and memory must be measured before the transport is
+  accepted;
+- remote hostnames must resolve without blocking the interactive frame loop;
+- certificate validation cannot silently assume the user-set 3DS clock is
+  correct;
 - if modern TLS is difficult, do not solve that by writing a home-made cipher;
 - prefer an existing, maintained crypto/TLS implementation or a different architecture.
+
+R-010 must evaluate a maintained TLS branch rather than accepting a stale
+packaged dependency by convenience. Endpoint pinning may help with the 3DS clock
+and CA-bundle constraints, but a production design must bind a stable endpoint
+identity, define rotation/recovery, and avoid an unmaintainable permanent leaf
+certificate pin. Disabling certificate or time validation is not an acceptable
+remote solution.
 
 ## 8. Relay
 

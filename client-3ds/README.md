@@ -9,8 +9,9 @@ The client currently provides:
 - native software-keyboard text capture;
 - bounded-memory live microphone streaming using signed PCM16 mono at 16,364 Hz;
 - two pre-warmed HTTP/1.1 connections for low-latency commands and audio;
+- non-blocking per-frame runtime connection, send, receive, and finalization;
 - protocol-v1 commands with unique command IDs;
-- bounded NDJSON event polling with a per-session sequence cursor;
+- bounded adaptive NDJSON event checks with a per-session sequence cursor;
 - incremental fake-agent text, status, approval, and interruption UI;
 - fixed 2 KiB response storage and held-button scroll navigation.
 
@@ -83,7 +84,7 @@ path can be tested.
 Record the hardware model, host OS, tool versions, and displayed timings.
 
 1. Start the TypeScript bridge and confirm it prints its listening address.
-2. Launch `0.1.0-stage1` through the Homebrew Launcher.
+2. Launch `0.1.1-stage1` through the Homebrew Launcher.
 3. Confirm startup reports `warm links: 2/2`, then shows agent state `idle`.
 4. Press `A`, cancel the keyboard, and confirm the app returns safely.
 5. Press `A`, send `hello from 3DS`, and confirm the bridge accepts it almost
@@ -106,15 +107,27 @@ Record the hardware model, host OS, tool versions, and displayed timings.
 14. Leave the app idle for at least eleven minutes, then send another prompt and
     start a short audio capture. Record whether both connections recover without
     restarting the app.
-15. Stop the bridge and confirm a visible event error. Restart it and confirm the
-    app reports a session resync, then sends a new prompt without being restarted.
-16. Close and reopen the shell during an active turn and record the resulting
+15. With a scrollable response on screen, stop the bridge. While an event check
+    and then a user command fail in the background, hold Up/Down and confirm the
+    screen and held-repeat navigation never freeze for the five-second network
+    timeout.
+16. Restart the bridge and confirm the app reports a session resync, then sends a
+    new prompt and displays the complete fake-agent response without restarting
+    the app.
+17. Stop the bridge during a short microphone capture, release `R`, and confirm
+    the finalizing UI remains live until it reports a bounded stream error.
+18. Close and reopen the shell during an active turn and record the resulting
     stop, error, or resume behavior.
-17. Press `START` and confirm a clean return to the Homebrew Launcher.
+19. Press `START` and confirm a clean return to the Homebrew Launcher.
 
 Do not mark the Stage 1 handheld slice complete until steps 1–13 pass. The
 long-idle, restart, and shell behavior are explicit reliability follow-ups even
 if the main vertical slice succeeds.
+
+The current development client checks for agent events about every 100 ms while
+working, 250 ms while an approval is pending, once per second while idle, and
+with one-to-ten-second retry backoff after failure. These are bridge reads, not
+phantom button events. Local push delivery is the next transport experiment.
 
 ## Troubleshooting
 

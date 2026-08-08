@@ -420,7 +420,7 @@ Start with whichever is simplest and most legible.
 
 **Question:** Which maintained TLS/crypto path is practical on current 3DS homebrew?
 
-**Status:** TODO / high priority before remote beta
+**Status:** PRELIMINARY HOST RESEARCH / HARDWARE SPIKE TODO
 
 Test:
 - available devkitPro libraries;
@@ -431,6 +431,40 @@ Test:
 - timeouts.
 
 Do not invent custom cryptography.
+
+**2026-08-08 package and architecture inspection:**
+
+- The current devkitPro `3ds-curl` package definition is still 8.4.0-1. Its
+  build disables the threaded resolver and pthreads and does not enable
+  WebSocket support. curl made WebSocket support non-experimental in 8.11.0, so
+  this package is not a production-ready shortcut to WSS.
+- The current devkitPro `3ds-mbedtls` package definition is 2.28.8-1. Upstream
+  now lists 3.6 and 4.1 as its maintained LTS branches; 2.28 is historical. A
+  maintained custom 3DS build is therefore a likely spike candidate, not a
+  decision already made.
+- The curl package points at an SD-card CA bundle and disables its threaded
+  resolver. The current 3gent socket client accepts only numeric IPv4. A remote
+  relay needs a hostname, so non-blocking DNS is a shared prerequisite for WSS
+  and raw TLS rather than a framing-specific detail.
+- Ordinary certificate validity checks depend on the user-set 3DS RTC. The
+  spike must test a wrong clock and evaluate a reviewed endpoint-identity plan;
+  it must not simply disable validation. Pinning requires a rotation and
+  recovery design rather than a permanent leaf-certificate assumption.
+- WSS now leads at the product level because hosted relay and proxy traversal
+  matter; raw TLS remains the fallback. This is still Proposed. The expensive
+  question is whether a maintained TLS stack can meet Old 3DS handshake,
+  memory, and reconnect targets.
+
+**Required hardware measurements:**
+
+- clean and resumed handshake duration on the tested 3DS model;
+- peak/steady memory and resulting client binary size;
+- TLS version and selected cipher suite;
+- correct-certificate, wrong-host, expired-certificate, wrong-clock, and pin or
+  trust-anchor rotation behavior;
+- DNS lookup without a visible frame-loop stall;
+- session resumption after Wi-Fi loss, lid close, and hotspot changes;
+- one secure control connection versus independent control/media connections.
 
 ---
 
@@ -520,9 +554,36 @@ agent-agnostic local session loop before a real agent is introduced?
   summarized as chunk and total byte counts. Default logs continue to omit full
   prompt content.
 
+**2026-08-08 non-blocking runtime implementation record:**
+
+- Version `0.1.1-stage1` replaces runtime five-second socket waits with bounded
+  control and audio state machines advanced once per frame. Connect, header/body
+  send, response receive, PCM chunk send, and audio finalization can all remain
+  in progress while the app continues scanning buttons and drawing.
+- One bounded control operation is active at a time. A text capture, approval,
+  or interrupt can cancel a background event read so a user action is not queued
+  behind a stale poll. Unique command IDs and bridge deduplication still protect
+  accepted mutations.
+- Event checks retain the protocol-v1 sequence cursor and three-event/2 KiB
+  bounds, but adapt from roughly 100 ms while working to 250 ms for approvals
+  and one second while idle. Failure retries back off from one to ten seconds.
+- The bridge-to-3DS direction remains functional: `assistant.text.delta`, state,
+  approval, completion, and error events are applied and rendered separately
+  from 3DS-to-bridge capture/control acknowledgements.
+- Audio keeps the fixed 8 KiB client staging buffer and a single bounded network
+  chunk queue. Releasing `R` stops sampling immediately, then drains and
+  finalizes asynchronously instead of holding the frame loop for the server
+  response.
+- Host result: the client compiles cleanly with devkitARM r68-1 and libctru
+  2.7.0-1 for `10.0.0.196:8080`. Hardware responsiveness, stream correctness,
+  and reconnect behavior are not claimed until the updated checklist passes.
+- Size result: the linked ELF reports 205,196 bytes of text, 7,808 bytes of
+  data, and 58,728 bytes of BSS; the packaged 3DSX is approximately 223 KiB.
+
 **Conclusion:** the host-side vertical slice is reproducible, bounded, and has
-a qualitative core hardware pass. Complete the focused Stage 1 reliability and
-interaction checks before beginning the Codex adapter.
+a qualitative core hardware pass. Complete the focused `0.1.1-stage1`
+reliability checks, then prove local push and R-010 before beginning the Codex
+adapter.
 
 ---
 

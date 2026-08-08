@@ -168,9 +168,13 @@ Candidate B: maintain persistent connections while the app is active.
 Version `0.0.8-stage0` tested Candidate B using two warm HTTP/1.1 connections and
 `Content-Length` response framing. The physical retest passed and the user
 reported that text and audio startup felt responsive. Stage 1 therefore keeps
-the two warm local connections. This does not accept a production remote
-transport; WebSocket, a small persistent socket protocol, and encrypted remote
-transports remain open candidates.
+the two warm local connections.
+
+Version `0.1.1-stage1` removes runtime socket waits from the interactive frame
+loop. A bounded state machine advances control and audio work once per frame;
+user commands can cancel an in-flight background event read. This is a required
+property of any later transport, but it still does not accept the production
+remote transport or the final number of connections.
 
 ### D-P10 — Stage 1 event delivery
 
@@ -181,8 +185,35 @@ for newline-delimited JSON event batches. Per-session sequence numbers allow a
 client to request events after its last applied cursor and replay a bounded
 history after a short disconnect.
 
+Version `0.1.1-stage1` makes those checks asynchronous and adaptive: about 100 ms
+while working, 250 ms while waiting for approval, one second while idle, and an
+exponential one-to-ten-second failure retry. This reduces idle log and network
+volume without sacrificing the fake agent's current response cadence.
+
 This choice reuses the low-latency socket behavior proven on physical 3DS
-hardware and keeps commands available while the fake agent runs. It does not
-select the final encrypted remote transport. Long polling, WebSocket, or another
-framed persistent transport may replace the polling layer after hardware and
-relay measurements.
+hardware and preserves cursor replay while the fake agent runs. Polling remains
+a temporary local mechanism: its bounded batch/2 KiB response ceiling cannot be
+assumed to sustain real adapter event rates. Pushed events are the next local
+transport experiment.
+
+### D-P11 — Secure bidirectional remote transport
+
+**Status:** Proposed / resequenced behind R-010
+
+WSS is the leading remote control candidate because relay hosting, proxy
+traversal, and standard web infrastructure are real product requirements. A
+small raw TLS protocol is the fallback, especially for a self-hosted topology.
+
+Do not accept either framing until R-010 measures the shared TLS cost on Old 3DS:
+
+- maintained library/toolchain path;
+- handshake time, working memory, and reconnect/resumption behavior;
+- non-blocking hostname resolution;
+- certificate validation when the handheld RTC is incorrect;
+- viable endpoint identity and credential rotation.
+
+The WebSocket framing layer is small and reversible compared with TLS. The
+current devkitPro package situation must be reconfirmed during R-010 rather than
+assuming packaged WebSocket support. Separately decide whether control and
+audio share one secure connection or use independent connections after measuring
+backpressure, failure isolation, and the cost of a second TLS handshake.

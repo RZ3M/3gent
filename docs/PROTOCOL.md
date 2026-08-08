@@ -13,6 +13,8 @@ The protocol must remain independent of Codex, Claude Code, Herdr, or any other 
 - bounded payload sizes;
 - structured approvals;
 - media uploads separated from control messages where useful;
+- explicitly bidirectional: captures/control toward the bridge and agent
+  state/output/approvals back toward the 3DS;
 - straightforward to debug.
 
 ## 2. Non-goals
@@ -70,6 +72,13 @@ The local vertical slice uses persistent HTTP/1.1 connections:
 - chunked PCM upload on the audio connection;
 - short cursor-based event polls when the command connection is idle.
 
+Runtime requests are state machines advanced once per 3DS frame; no runtime
+socket operation may wait inside the input/render loop. A user command takes
+priority over and may cancel an in-flight event check. Event cadence is adaptive
+in `0.1.1-stage1`: approximately 100 ms while working, 250 ms while waiting for
+approval, one second while idle, and exponential one-to-ten-second retry after a
+failure.
+
 Every Stage 1 request sends:
 
 ```text
@@ -87,6 +96,8 @@ ID returns the original acknowledgement without running the command twice.
 
 This is a local transport experiment. Protocol messages are independent from the
 transport and the remote path must later add standard authenticated encryption.
+Polling is not an input event from the user; it is the current development
+client asking whether the bridge has agent-to-3DS events available.
 
 ## 5. Envelope
 
@@ -166,6 +177,10 @@ Successful mutations return a command acknowledgement:
 ```
 
 ## 7. Stage 1 server events
+
+These events are the bridge-to-3DS half of the product protocol. In particular,
+`assistant.text.delta` is how the handheld sees the agent's response while it is
+being produced; acknowledgements alone are not a substitute.
 
 ```text
 connection.ready
@@ -249,11 +264,17 @@ Do not base64 large media inside normal JSON events unless a benchmark shows tha
 
 Candidates must be tested on actual hardware.
 
-Possibilities include:
-- ordinary HTTP for request/response;
-- long polling;
-- a persistent socket protocol;
-- WebSocket if the available 3DS stack is reliable enough.
+The planned sequence is:
+
+1. keep application-level sequences, command IDs, replay, and deduplication;
+2. prove local pushed events, heartbeat, reconnect with jitter, and cursor resume;
+3. run R-010 for TLS, DNS, clock/certificate, memory, and handshake measurements;
+4. decide framing after those results.
+
+WSS leads for remote use because relay/proxy interoperability matters. A small
+raw TLS protocol is the fallback. Neither is Accepted, and the number of secure
+connections remains open. Ordinary HTTP polling remains only the local Stage 1
+fixture.
 
 Remote transport must be encrypted with a standard, reviewed security design.
 

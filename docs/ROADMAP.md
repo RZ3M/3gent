@@ -83,9 +83,42 @@ Implemented on the host:
 - deterministic fake text, approval, interruption, and audio behavior;
 - strict TypeScript build and automated bridge tests;
 - Stage 1 3DS build with bounded event parsing and the full control mapping.
+- non-blocking per-frame runtime network progress for commands, event checks,
+  microphone chunks, and audio finalization;
+- adaptive local event checks with user-command priority and bounded retry
+  backoff.
 
 Exit criterion: the physical checklist in `client-3ds/README.md` passes through
 text, interruption, both approval choices, and sustained audio.
+
+---
+
+## Stage 1.5 — Push and secure-transport feasibility
+
+**Status:** In progress; runtime pump host build passed, hardware check pending.
+
+This stage is intentionally before a real adapter because a blocking or
+unsupportable connection layer would invalidate later work.
+
+Deliver in this risk order:
+
+1. Prove the `0.1.1-stage1` runtime pump stays responsive during half-open,
+   bridge-offline, audio-finalization, and reconnect cases on physical hardware.
+2. Replace local event polling with pushed events while retaining sequence
+   cursor resume, bounded queues, heartbeat/liveness, reconnect with jitter, and
+   command deduplication.
+3. Run R-010 early: maintained TLS candidate, Old 3DS handshake time/memory,
+   non-blocking DNS, clock/certificate behavior, session resumption, and hotspot
+   behavior.
+4. With those measurements, choose WSS or raw TLS framing and one versus two
+   secure connections. WSS leads; raw TLS remains the fallback.
+
+All test transports must remain bidirectional: captures and controls go to the
+bridge; agent state, response deltas, approvals, and errors come back to the 3DS.
+
+Exit criterion: pushed local events recover from a forced disconnect without UI
+freezes, and R-010 has enough hardware evidence to accept or reject a secure
+remote transport direction.
 
 ---
 
@@ -102,6 +135,9 @@ Deliver:
 - surface approval request;
 - respond to approval;
 - show diff summary if practical.
+
+This is an observation-and-control loop, not send-only integration: Codex turn
+events and assistant output must remain visible on the 3DS throughout the turn.
 
 Codex-specific wire objects must stop at the adapter boundary.
 

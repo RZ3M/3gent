@@ -20,12 +20,15 @@ responsive.
 Stage 1 now turns those isolated proofs into a local fake-agent vertical slice:
 
 ```text
-3DS text/voice → TypeScript bridge → fake agent → protocol-v1 events → 3DS
+captures + commands: 3DS → TypeScript bridge → agent
+state + responses:  3DS ← TypeScript bridge ← agent
 ```
 
 It exercises session state, streamed text deltas, interruption, approval
 requests and responses, command deduplication, and cursor-based event replay
-before a real coding-agent adapter is introduced.
+before a real coding-agent adapter is introduced. 3gent is a bidirectional
+agent companion: sending input without showing what the agent is doing is not a
+complete product loop.
 
 ## Implementation status
 
@@ -53,10 +56,12 @@ actions no longer pay a fresh TCP handshake; its focused hardware retest passed.
 The new `bridge/` service is a TypeScript/Node implementation of the Stage 1
 agent boundary with a deterministic fake adapter. Its automated tests cover the
 protocol version, sessions, ordered/replayed events, duplicate commands,
-approvals, interruption, and streamed audio/WAV output. The `0.1.0-stage1` 3DS
-client builds successfully, and its first physical vertical-slice run was
-reported as working well. Detailed reliability cases remain on the hardware
-checklist.
+approvals, interruption, and streamed audio/WAV output. The `0.1.1-stage1` 3DS
+client advances runtime network work incrementally once per frame, prioritizes
+user commands over background event reads, and adapts local event checks from
+fast while an agent is working to quiet while idle. It builds successfully; the
+earlier `0.1.0-stage1` physical vertical-slice run was reported as working well,
+while the new no-freeze behavior still needs its focused hardware check.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical Stage 1 checklist. See [`bridge/README.md`](bridge/README.md) for the
@@ -121,9 +126,10 @@ Codex supports repository-level `AGENTS.md` instructions, so this repo uses `AGE
 
 The host implementation is complete and the core physical Stage 1 run works.
 Focused approval, interruption, reconnect, long-idle, audio-quality, and
-sleep/resume results are still being recorded before the first real desktop
-adapter; remote relay and production authentication remain deliberately
-deferred.
+sleep/resume results are still being recorded. Runtime I/O no longer waits on a
+socket in the 3DS frame loop. Push event delivery and an early secure-transport
+feasibility spike now precede the first real desktop adapter; the remote relay
+and production authentication remain deliberately deferred.
 
 ## License status
 

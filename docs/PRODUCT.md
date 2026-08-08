@@ -92,6 +92,20 @@ Approvals must be:
 - scoped to a session;
 - enforced by the desktop bridge even if the client behaves incorrectly.
 
+### 3.7 Bidirectional companion
+
+3gent is not merely an input device or prompt sender. The user must be able to
+observe and steer the remote agent from the handheld.
+
+Every production connection mode must support both directions:
+
+- 3DS to bridge: captures, approval responses, interrupts, and session controls;
+- bridge to 3DS: agent state, streamed responses, progress, approval requests,
+  errors, and completion.
+
+If the user must return to the laptop to understand what the agent is doing, the
+core product loop is incomplete.
+
 ## 4. Core use cases
 
 ### UC-01 — Voice prompt
@@ -200,3 +214,5 @@ Important unresolved items:
 - transcript review/edit behavior;
 - exact approval categories;
 - production remote transport and reconnect behavior.
+- whether production voice shares the control connection or uses an independent
+  media connection.

@@ -9,9 +9,7 @@
 │ Nintendo 3DS client │
 │ capture + control   │
 └─────────┬───────────┘
-          │
-          │ local or remote 3gent protocol
-          │
+          ⇅ local or remote 3gent protocol
 ┌─────────▼───────────┐
 │ Desktop bridge      │
 │ security + adapters │
@@ -28,6 +26,19 @@ Optional remote topology:
 
 3DS ⇄ relay ⇄ desktop bridge ⇄ local agent/runtime
 ```
+
+### Bidirectional contract
+
+The arrows are semantically bidirectional, not just request/acknowledgement:
+
+```text
+3DS → bridge: Capture, interrupt, approval response, session command
+3DS ← bridge: agent state, assistant output, progress, approval request, error
+```
+
+The desktop bridge translates agent-native events into versioned 3gent events.
+The client renders those events incrementally so the user can watch work and
+respond without returning to the laptop.
 
 ## 2. Nintendo 3DS client
 
@@ -63,6 +74,17 @@ Use the official devkitPro `3ds-examples` repository as the first reference for:
 - rendering streamed text;
 - rendering approval requests.
 
+### Runtime I/O invariant
+
+Once the interactive frame loop starts, network setup, send, receive, and audio
+finalization must make bounded zero-wait progress. A half-open connection must
+not prevent screen drawing, button scanning, or local navigation.
+
+The `0.1.1-stage1` client implements this as a single-threaded per-frame network
+pump with fixed request, response, and audio queues. Startup connection warmup
+remains a separately visible, bounded development step. DNS, TLS, heartbeat,
+reconnect, and future push framing must preserve the same runtime invariant.
+
 ### Constraints
 
 Assume:
@@ -89,8 +111,12 @@ Stage 1 implements the bridge in TypeScript on Node.js. The fake-agent adapter,
 HTTP transport, protocol validation, event store, and command registry are
 separate modules so the Codex adapter can replace only the fake-agent boundary
 in Stage 2. The current 3DS client sends versioned commands over one warm HTTP
-connection, streams microphone PCM over a second, and polls bounded NDJSON event
-batches using a per-session sequence cursor.
+connection, streams microphone PCM over a second, and checks bounded NDJSON
+event batches using a per-session sequence cursor. These operations advance
+asynchronously in the handheld frame loop. Event checks are adaptive: fast
+while an agent is working, slower for an approval, quiet while idle, and backed
+off after failures. This is a local bridge experiment, not the final push
+transport.
 
 ### Responsibilities
 
@@ -284,6 +310,25 @@ This is a first-class user workflow because 3DS Wi-Fi support is old and guest/c
 ```
 
 Core remote-use path.
+
+### Remote transport sequencing
+
+Remote control must ultimately use encrypted, push-capable, bidirectional
+delivery. WSS leads as the remote candidate because hosted relays, reverse
+proxies, and ordinary web infrastructure are real product constraints. A small
+raw TLS protocol remains the fallback when self-hosting or measured handheld
+cost makes it preferable.
+
+That framing choice is deliberately downstream of R-010. TLS library support,
+Old 3DS handshake time and memory, DNS without blocking the frame loop,
+certificate validation with an unreliable user-set clock, session resumption,
+and reconnection are the expensive shared risks. Push framing should not hide or
+lead those measurements.
+
+Before secure remote transport, the local slice should prove pushed events,
+heartbeat/liveness, reconnect with jitter, and cursor resume. Sequence numbers,
+command IDs, replay, and deduplication remain application-protocol properties
+across either WSS or raw TLS.
 
 ## 9. QR pairing
 
