@@ -69,6 +69,7 @@ static char pending_transcript[THREEGENT_PROMPT_CAPACITY];
 static bool transcript_ready;
 static bool photo_pending;
 static char photo_capture_path[128];
+static bool frame_dirty;
 
 static void set_view_state(const char *state)
 {
@@ -275,6 +276,7 @@ static void redraw(void)
 {
     draw_top();
     draw_bottom();
+    frame_dirty = true;
 }
 
 static void present_frame(void)
@@ -282,6 +284,16 @@ static void present_frame(void)
     gfxFlushBuffers();
     gfxSwapBuffers();
     gspWaitForVBlank();
+    frame_dirty = false;
+}
+
+static void present_if_needed(void)
+{
+    if (frame_dirty) {
+        present_frame();
+    } else {
+        gspWaitForVBlank();
+    }
 }
 
 static void append_response(const char *text)
@@ -431,6 +443,8 @@ static void draw_session_picker(size_t selected, const char *status)
 
 static bool wait_for_control_request(const char *status)
 {
+    draw_session_picker(0, status);
+    present_frame();
     while (aptMainLoop()) {
         hidScanInput();
         if ((hidKeysDown() & KEY_START) != 0) {
@@ -439,8 +453,6 @@ static bool wait_for_control_request(const char *status)
         }
         network_pump();
         NetworkOperationStatus operation = network_control_status();
-        draw_session_picker(0, status);
-        present_frame();
         if (operation == NETWORK_OPERATION_SUCCEEDED) {
             return true;
         }
@@ -454,6 +466,7 @@ static bool wait_for_control_request(const char *status)
             network_control_consume();
             return false;
         }
+        gspWaitForVBlank();
     }
     network_control_cancel();
     return false;
@@ -593,6 +606,10 @@ static bool choose_session(void)
     while (!load_session_choices()) {
         session_count = 0;
         bool retry = false;
+        draw_session_picker(0, network_detail);
+        consoleSelect(&bottom_console);
+        printf("\nA/X: Retry task discovery\n");
+        present_frame();
         while (aptMainLoop()) {
             hidScanInput();
             u32 keys = hidKeysDown();
@@ -603,40 +620,48 @@ static bool choose_session(void)
                 retry = true;
                 break;
             }
-            draw_session_picker(0, network_detail);
-            consoleSelect(&bottom_console);
-            printf("\nA/X: Retry task discovery\n");
-            present_frame();
+            gspWaitForVBlank();
         }
         if (!retry) {
             return false;
         }
     }
     size_t selected = 0;
+    draw_session_picker(selected, network_detail);
+    present_frame();
     while (aptMainLoop()) {
         hidScanInput();
         u32 keys = hidKeysDown();
+        bool picker_changed = false;
         if ((keys & KEY_START) != 0) {
             return false;
         }
         if ((keys & KEY_UP) != 0 && session_count > 0) {
             selected = selected == 0 ? session_count - 1 : selected - 1;
+            picker_changed = true;
         }
         if ((keys & KEY_DOWN) != 0 && session_count > 0) {
             selected = (selected + 1) % session_count;
+            picker_changed = true;
         }
         if ((keys & KEY_A) != 0 && session_count > 0) {
             if (resume_session(selected)) {
                 return true;
             }
+            picker_changed = true;
         }
         if ((keys & KEY_X) != 0) {
             if (start_new_session()) {
                 return true;
             }
+            picker_changed = true;
         }
-        draw_session_picker(selected, network_detail);
-        present_frame();
+        if (picker_changed) {
+            draw_session_picker(selected, network_detail);
+            present_frame();
+        } else {
+            gspWaitForVBlank();
+        }
     }
     return false;
 }
@@ -1649,7 +1674,7 @@ int main(int argc, char **argv)
                 request_microphone_finish(false);
             }
             update_microphone_capture();
-            present_frame();
+            present_if_needed();
             continue;
         }
 
@@ -1735,7 +1760,7 @@ int main(int argc, char **argv)
 
         handle_scroll_input(keys_down, keys_held);
 
-        present_frame();
+        present_if_needed();
     }
 
     camera_capture_shutdown();

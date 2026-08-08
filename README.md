@@ -67,7 +67,7 @@ The `bridge/` service is a TypeScript/Node implementation of the agent boundary
 with selectable fake and Codex app-server adapters. Its automated tests cover the
 protocol version, sessions, ordered/replayed events, duplicate commands,
 approvals, interruption, and streamed audio/WAV output. The
-`0.6.1-hwtest` 3DS client uses a persistent pushed control link: commands
+`0.6.2-hwtest` 3DS client uses a persistent pushed control link: commands
 go to the bridge and agent events return immediately without HTTP polling. It
 adds heartbeat, jittered reconnect, cursor replay, visible resync, and safe
 retry of one unacknowledged command. The bridge has 44 passing automated tests

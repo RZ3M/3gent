@@ -22,7 +22,7 @@ repository and disposable prompts/media throughout this build.
 
    Replace the address with the laptop's numeric LAN IPv4. Require a clean build.
 4. Copy `3gent.3dsx` and `3gent.smdh` to `/3ds/3gent/` on the SD card. Confirm
-   Homebrew Launcher shows version `0.6.1-hwtest`.
+   Homebrew Launcher shows version `0.6.2-hwtest`.
 5. Create a disposable Git repository/worktree containing at least one text file.
 
 ## B. Deterministic fake-adapter regression

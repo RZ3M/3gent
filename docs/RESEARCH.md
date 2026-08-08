@@ -612,7 +612,7 @@ adapter.
 event requests while retaining bounded memory, replay, command safety, and a
 responsive frame loop?
 
-**Status:** HOST PASS / PHYSICAL 3DS TEST PENDING
+**Status:** FAKE-BACKEND HARDWARE FLOW PASS / REAL TRANSCRIPTION CHECKLIST PENDING
 
 **2026-08-08 implementation record:**
 
@@ -742,6 +742,11 @@ non-ASCII transcripts on physical 3DS hardware.
 **Conclusion:** Stage 3 is ready for physical testing. The same transcript event
 contract works with local/self-hosted and hosted recognizers.
 
+**2026-08-08 initial hardware update:** With the `0.6.1-hwtest` client and fake
+adapter, microphone audio uploaded, produced the mock reviewed transcript, and
+sent successfully. Real transcription, edit/cancel, long-input and failure-path
+items remain pending.
+
 ---
 
 ## R-017 — Self-hosted reverse relay feasibility
@@ -778,7 +783,7 @@ disposable cross-network hardware test. It does not close R-010 or D-P11.
 **Question:** Can the handheld capture, preview, upload and attach a bounded
 photo without expanding the client into an image editor?
 
-**Status:** HOST/BUILD PASS / PHYSICAL CAMERA TEST PENDING
+**Status:** INITIAL HARDWARE FLOW PASS / IMAGE QUALITY AND CODEX CHECKLIST PENDING
 
 **2026-08-08 implementation record:**
 
@@ -804,6 +809,10 @@ and real Codex visual interpretation.
 **Conclusion:** photo functionality is ready for the physical checklist; sketch
 capture remains deliberately excluded.
 
+**2026-08-08 initial hardware update:** The `0.6.1-hwtest` client captured and
+sent a photo successfully through the fake bridge. The full orientation/color,
+cancel, cross-session, retry and real Codex attachment checks remain pending.
+
 ---
 
 ## R-019 — Functional-core startup discovery on hardware
@@ -811,7 +820,7 @@ capture remains deliberately excluded.
 **Question:** Does a failed initial session lookup remain observable and
 recoverable instead of looking like an application crash?
 
-**Status:** ROOT CAUSE CONFIRMED / FIX BUILDS / PHYSICAL RETEST PENDING
+**Status:** CORRECT-ENDPOINT DISCOVERY PASS / OFFLINE RETRY RETEST PENDING
 
 **2026-08-08 hardware report and diagnosis:**
 
@@ -831,6 +840,32 @@ recoverable instead of looking like an application crash?
 **Conclusion:** compile-time endpoint mistakes must be visible and retryable.
 The physical retest must confirm task discovery and pushed connection using the
 correct embedded address.
+
+---
+
+## R-020 — Console framebuffer flicker
+
+**Question:** Can the console UI remain stable when no visible state changed?
+
+**Status:** ROOT CAUSE CONFIRMED / FIX BUILDS / PHYSICAL RETEST PENDING
+
+**2026-08-08 hardware report and diagnosis:**
+
+- Version `0.6.1-hwtest` reached the fake task picker and the underlying text,
+  photo and voice flows worked, but both screens flashed continuously while the
+  picker was idle.
+- A hardware photo showed partially rendered alternating console frames. The
+  picker cleared, redrew and swapped framebuffers on every loop iteration even
+  when selection and status were unchanged. The main loop also swapped idle
+  buffers without requiring a redraw.
+- Version `0.6.2-hwtest` marks console frames dirty on redraw, swaps only dirty
+  main frames, and leaves a stable front buffer while idle. Session loading and
+  retry screens draw once; the picker redraws only when selection or status
+  changes.
+
+**Conclusion:** framebuffer swaps are presentation work, not a frame-loop
+heartbeat. The physical retest must cover idle task picker, idle main view,
+streamed response updates, held scrolling, microphone meters and photo preview.
 
 ---
 
