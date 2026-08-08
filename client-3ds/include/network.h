@@ -114,6 +114,27 @@ const char *network_audio_stream_error(void);
 void network_audio_stream_consume(void);
 void network_audio_stream_abort(void);
 
+/* Photo upload shares the bounded media socket/queue with audio. */
+bool network_photo_upload_begin(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *error,
+    size_t error_capacity
+);
+bool network_photo_upload_can_write(void);
+bool network_photo_upload_write(
+    const void *data,
+    size_t size,
+    char *error,
+    size_t error_capacity
+);
+bool network_photo_upload_finish(char *error, size_t error_capacity);
+NetworkOperationStatus network_photo_upload_status(void);
+const char *network_photo_upload_error(void);
+void network_photo_upload_consume(void);
+void network_photo_upload_abort(void);
+
 /* Perform zero-wait progress for both control and audio network state. */
 void network_pump(void);
 

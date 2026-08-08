@@ -61,6 +61,13 @@ Recheck this at implementation time.
 
 ## Nintendo network compatibility
 
+### devkitPro camera image example
+https://github.com/devkitPro/3ds-examples/tree/master/camera/image
+
+The Stage 6 spike follows the current official libctru example's camera service,
+RGB565, transfer-size, receive-event, shutter and cleanup sequence, narrowed to
+one 400×240 outer-camera image.
+
 ### Compatible wireless modes/security
 https://en-americas-support.nintendo.com/app/answers/detail/a_id/498/p/897/c/871
 
@@ -102,6 +109,14 @@ Important current behavior:
 - diff updates;
 - schema generation commands;
 - direct WebSocket listener is documented as experimental/unsupported, so do not make it the production dependency.
+
+### OpenAI audio transcription API
+https://platform.openai.com/docs/api-reference/audio/createTranscription
+
+The optional hosted Stage 3 backend sends a WAV multipart upload to
+`/v1/audio/transcriptions`. The default `gpt-4o-mini-transcribe` model and WAV
+input support were rechecked against the official API reference on 2026-08-08.
+The API key remains on the desktop bridge.
 
 ## Herdr
 

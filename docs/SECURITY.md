@@ -139,6 +139,14 @@ may be exposed to the internet.
 
 It must not be presented as the remote production security model.
 
+Version `0.6.0-hwtest` additionally contains an explicitly unsafe self-hosted
+reverse relay because production security was excluded from the current test
+scope. The relay refuses to start without `--unsafe-public`; bridge uplinks need
+a token, but 3DS-facing HTTP and control sockets are plaintext and
+unauthenticated. It is suitable only for a private/test server, restrictive
+firewall, and disposable content. It does not satisfy any public-beta security
+requirement and must never be enabled by default.
+
 ## 10. Logging
 
 Logs must avoid:

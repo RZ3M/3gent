@@ -1,7 +1,7 @@
-# 3gent Stage 1.5 3DS client
+# 3gent functional core hardware-test client
 
 This client connects the handheld feasibility work to the TypeScript desktop
-bridge and its deterministic fake agent. It is still a local-development build,
+bridge and either its deterministic fake agent or local Codex adapter. It is still a local-development build,
 not a remotely secure product.
 
 The client currently provides:
@@ -14,8 +14,10 @@ The client currently provides:
 - a persistent bidirectional pushed-control link with no event polling;
 - heartbeat, jittered reconnect, applied-cursor replay, and visible resync;
 - safe retry of one unacknowledged command with its original command ID;
-- incremental fake-agent text, status, approval, and interruption UI;
-- fixed 2 KiB response storage and held-button scroll navigation.
+- recent-task selection plus new-task creation in the configured bridge workspace;
+- incremental agent text, status, diff summary, approval, and interruption UI;
+- 400×240 outer-camera capture, preview, bounded upload and next-prompt attachment;
+- fixed 4 KiB response storage and held-button scroll navigation.
 
 Stage 0 keyboard, LAN, streamed rendering, scrolling, sustained microphone
 capture, and warm-connection latency have passed on physical hardware. The first
@@ -46,14 +48,20 @@ Replace `192.168.1.42` with the computer's address. Runtime configuration and
 pairing come in later stages. The build produces `3gent.3dsx`, `3gent.smdh`,
 `3gent.elf`, and `build/3gent.map`.
 
-From the repository root, install, test, and start the Stage 1.5 bridge:
+From the repository root, install, test, and start the functional Codex bridge:
 
 ```sh
 cd bridge
 npm ci
 npm test
-npm start -- --host 0.0.0.0 --port 8080 --push-port 8081
+OPENAI_API_KEY=... npm start -- --adapter codex --transcriber openai \
+  --workspace /path/to/project --host 0.0.0.0 --port 8080 --push-port 8081
 ```
+
+That command enables the complete typed, voice, and photo path. To test only
+typed input and photos, omit `OPENAI_API_KEY=... --transcriber openai`; microphone
+finalization will then clearly report that transcription is not configured. A
+local/self-hosted transcription command is documented in `bridge/README.md`.
 
 For full request, prompt, acknowledgement, event, and audio-chunk diagnostics,
 append `--verbose`. Empty event checks are hidden so the terminal shows only
@@ -72,18 +80,74 @@ internet.
 Copy `3gent.3dsx` and `3gent.smdh` into `3ds/3gent/` on the SD card, then launch
 3gent through the Homebrew Launcher.
 
-The Stage 1.5 controls are:
+At launch, Up/Down chooses a recent task, `A` resumes it, and `X` creates a new
+task in `--workspace`. Runtime controls are:
 
-- `A`: open the native keyboard and send text to the fake agent;
-- `X`: start a fake approval demo, or approve once when one is pending;
+- `A`: open the native keyboard and send text to the selected agent;
+- `X`: send an approval-test prompt, or approve once when one is pending;
 - `B`: interrupt an active turn, or decline a pending approval;
-- hold `R`: stream microphone audio, then send it on release;
+- hold `R`: stream microphone audio, then review its transcript on release;
+- `L`: capture and preview a photo, then attach it to the next prompt;
 - D-pad/Circle Pad Up/Down: scroll the response, including held repeat;
 - `START`: exit.
 
-Successful audio is saved as `bridge/data/latest.wav`. The fake adapter does not
-transcribe it yet; it generates a mock voice-capture response so the full event
-path can be tested.
+Successful audio is saved as `bridge/data/latest.wav`, transcribed by the
+configured laptop backend, and returned for review. `A` sends the reviewed
+transcript, `Y` edits it in the native keyboard, and `B` cancels it. Recording
+never starts an agent turn automatically.
+
+## Focused Stage 2 Codex checklist
+
+Run this before the longer Stage 1.5 reliability list below:
+
+1. Start the bridge with `--adapter codex --workspace` pointing at a disposable
+   test repository; confirm the bridge reports `Adapter: Codex app-server`.
+2. Launch `0.6.0-hwtest`; confirm no fake session ID is required and up to six
+   recent Codex tasks appear.
+3. Move the selection with tapped Up/Down, resume a task with `A`, and confirm
+   the pushed link becomes ready.
+4. Relaunch, press `X` in the task chooser, and confirm a new Codex task appears
+   on the laptop under the configured workspace.
+5. Send a harmless typed request. Confirm text deltas appear while Codex works,
+   completion returns the handheld to idle, and no Codex UUID appears on-screen.
+6. Ask Codex to edit a disposable file. Confirm response text and the compact
+   changed-file/addition/deletion summary arrive.
+7. In a disposable repository whose desktop Codex policy asks before the chosen
+   command, request that exact command. Confirm the bounded summary appears;
+   approve once with `X` and verify Codex proceeds once.
+8. Trigger another approval, decline with `B`, and verify Codex does not execute it.
+9. Start a longer request and press `B`; confirm the matching Codex turn is
+   interrupted and the session returns to idle.
+10. Stop/restart the bridge during output and confirm replay/resync keeps the UI
+    responsive. Then resume the same task and send a follow-up successfully.
+11. Hold `R`, speak a short request, and release. Confirm the recording is
+    transcribed but no Codex turn starts. Review the text, press `Y` to edit and
+    cancel once, then record again and press `A` to send. Only that final
+    transcript should create a Codex turn.
+12. Press `L`, confirm the shutter/preview, cancel once with `B`, then capture
+    again and accept with `A`. Confirm upload progress reaches 192,000 bytes.
+13. Type a prompt asking Codex to inspect the photo. Confirm the handheld marks
+    the attachment consumed, `bridge/data/latest.bmp` opens correctly, and Codex
+    receives one image with that prompt. The following prompt must not reuse it.
+
+## Self-hosted relay hardware test
+
+Run the relay and bridge exactly as documented in `bridge/README.md`, then build
+with the relay server's numeric IPv4 address and public ports:
+
+```sh
+make SERVER_HOST=203.0.113.10 SERVER_PORT=9080 PUSH_PORT=9081
+```
+
+The current relay is an explicit plaintext test build and must not carry secrets
+or be treated as production security. Test from a different network/hotspot:
+
+1. Confirm the task chooser loads through the HTTP reverse tunnel.
+2. Resume a task and confirm pushed text/state works in both directions.
+3. Record, transcribe, review and send voice through the relay.
+4. Capture/upload a photo and consume it with the next prompt.
+5. Stop the laptop bridge; verify the 3DS remains responsive and reconnects
+   after the bridge returns without restarting the relay or handheld app.
 
 ## Physical Stage 1.5 verification checklist
 
@@ -166,6 +230,10 @@ The current development client does not poll for events. The bridge pushes them
 over port 8081. After three seconds without inbound traffic the 3DS sends a
 heartbeat; after eight seconds without any response it reconnects with jittered
 250 ms-to-ten-second backoff. Ordinary verbose logs suppress heartbeats.
+
+For the consolidated real-Codex, voice, photo, failure and remote-relay pass,
+use `docs/HARDWARE_TEST_CHECKLIST.md`; it supersedes overlapping historical
+steps in this Stage 1.5 regression list.
 
 ## Troubleshooting
 

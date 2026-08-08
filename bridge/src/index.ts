@@ -1,7 +1,20 @@
 import { resolve } from "node:path";
+import type { Server } from "node:net";
+import type { Socket } from "node:net";
 
+import type { AgentAdapter } from "./agent-adapter.js";
+import { CodexAgentAdapter } from "./codex-agent-adapter.js";
+import { EventStore } from "./event-store.js";
+import { FakeAgentAdapter } from "./fake-agent-adapter.js";
 import { createPushControlServer } from "./push-server.js";
 import { createBridgeServer } from "./server.js";
+import { ReverseTunnelClient } from "./reverse-tunnel.js";
+import {
+  CommandTranscriber,
+  OpenAiTranscriber,
+  StaticTranscriber,
+  type Transcriber,
+} from "./transcriber.js";
 
 interface Options {
   host: string;
@@ -13,6 +26,16 @@ interface Options {
   pushTestDropNextAck: boolean;
   verbose: boolean;
   verbosePolls: boolean;
+  adapter: "fake" | "codex";
+  codexExecutable: string;
+  workspace: string;
+  transcriber: "auto" | "none" | "openai" | "command";
+  transcriptionCommand: string | null;
+  transcriptionArguments: string[];
+  transcriptionModel: string;
+  relayHost: string | null;
+  relayHttpUplinkPort: number;
+  relayPushUplinkPort: number;
 }
 
 function parseArguments(arguments_: string[]): Options {
@@ -26,6 +49,16 @@ function parseArguments(arguments_: string[]): Options {
     pushTestDropNextAck: false,
     verbose: false,
     verbosePolls: false,
+    adapter: "fake",
+    codexExecutable: "codex",
+    workspace: process.cwd(),
+    transcriber: "auto",
+    transcriptionCommand: null,
+    transcriptionArguments: [],
+    transcriptionModel: "gpt-4o-mini-transcribe",
+    relayHost: null,
+    relayHttpUplinkPort: 9180,
+    relayPushUplinkPort: 9181,
   };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -54,6 +87,37 @@ function parseArguments(arguments_: string[]): Options {
       options.pushTestBlackhole = true;
     } else if (argument === "--push-test-drop-next-ack") {
       options.pushTestDropNextAck = true;
+    } else if (argument === "--adapter" && (value === "fake" || value === "codex")) {
+      options.adapter = value;
+      index += 1;
+    } else if (argument === "--codex-executable" && value !== undefined) {
+      options.codexExecutable = value;
+      index += 1;
+    } else if (argument === "--workspace" && value !== undefined) {
+      options.workspace = resolve(value);
+      index += 1;
+    } else if (argument === "--transcriber"
+      && (value === "auto" || value === "none" || value === "openai" || value === "command")) {
+      options.transcriber = value;
+      index += 1;
+    } else if (argument === "--transcription-command" && value !== undefined) {
+      options.transcriptionCommand = value;
+      index += 1;
+    } else if (argument === "--transcription-arg" && value !== undefined) {
+      options.transcriptionArguments.push(value);
+      index += 1;
+    } else if (argument === "--transcription-model" && value !== undefined) {
+      options.transcriptionModel = value;
+      index += 1;
+    } else if (argument === "--relay-host" && value !== undefined) {
+      options.relayHost = value;
+      index += 1;
+    } else if (argument === "--relay-http-uplink-port" && value !== undefined) {
+      options.relayHttpUplinkPort = Number(value);
+      index += 1;
+    } else if (argument === "--relay-push-uplink-port" && value !== undefined) {
+      options.relayPushUplinkPort = Number(value);
+      index += 1;
     } else {
       throw new Error(`unknown or incomplete argument: ${argument ?? ""}`);
     }
@@ -67,6 +131,14 @@ function parseArguments(arguments_: string[]): Options {
   if (options.pushPort === options.port) {
     throw new Error("--push-port must differ from --port");
   }
+  for (const [name, port] of [
+    ["--relay-http-uplink-port", options.relayHttpUplinkPort],
+    ["--relay-push-uplink-port", options.relayPushUplinkPort],
+  ] as const) {
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error(`${name} must be an integer from 1 to 65535`);
+    }
+  }
   if (!Number.isInteger(options.fakeDeltaIntervalMs)
     || options.fakeDeltaIntervalMs < 1
     || options.fakeDeltaIntervalMs > 10_000) {
@@ -76,9 +148,48 @@ function parseArguments(arguments_: string[]): Options {
 }
 
 const options = parseArguments(process.argv.slice(2));
+const events = new EventStore();
+let adapter: AgentAdapter;
+if (options.adapter === "codex") {
+  console.log("Starting local Codex app-server adapter...");
+  adapter = await CodexAgentAdapter.create({
+    events,
+    executable: options.codexExecutable,
+    logger: options.verbose ? console.log : () => {},
+  });
+} else {
+  adapter = new FakeAgentAdapter(events, options.fakeDeltaIntervalMs);
+}
+let transcriber: Transcriber | undefined;
+const transcriberChoice = options.transcriber === "auto"
+  ? options.adapter === "fake" ? "mock" : "none"
+  : options.transcriber;
+if (transcriberChoice === "mock") {
+  transcriber = new StaticTranscriber();
+} else if (transcriberChoice === "openai") {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (apiKey === undefined || apiKey.length === 0) {
+    throw new Error("OPENAI_API_KEY is required for --transcriber openai");
+  }
+  transcriber = new OpenAiTranscriber({
+    apiKey,
+    model: options.transcriptionModel,
+  });
+} else if (transcriberChoice === "command") {
+  if (options.transcriptionCommand === null) {
+    throw new Error("--transcription-command is required for --transcriber command");
+  }
+  transcriber = new CommandTranscriber({
+    executable: options.transcriptionCommand,
+    arguments: options.transcriptionArguments,
+  });
+}
 const {application, server} = createBridgeServer({
+  adapter,
+  events,
   capturePath: options.capturePath,
-  fakeDeltaIntervalMs: options.fakeDeltaIntervalMs,
+  defaultCwd: options.workspace,
+  ...(transcriber === undefined ? {} : {transcriber}),
   verbose: options.verbose,
   verbosePolls: options.verbosePolls,
 });
@@ -88,16 +199,42 @@ const pushServer = createPushControlServer(application, {
   verbose: options.verbose,
   verboseHeartbeats: options.verbosePolls,
 });
+const activeSockets = new Set<Socket>();
+for (const listener of [server, pushServer]) {
+  listener.on("connection", (socket: Socket) => {
+    activeSockets.add(socket);
+    socket.once("close", () => activeSockets.delete(socket));
+  });
+}
+let reverseTunnel: ReverseTunnelClient | null = null;
+if (options.relayHost !== null) {
+  const token = process.env.THREEGENT_RELAY_TOKEN;
+  if (token === undefined) {
+    throw new Error("THREEGENT_RELAY_TOKEN is required with --relay-host");
+  }
+  reverseTunnel = new ReverseTunnelClient({
+    relayHost: options.relayHost,
+    relayHttpUplinkPort: options.relayHttpUplinkPort,
+    relayPushUplinkPort: options.relayPushUplinkPort,
+    token,
+    localHttpPort: options.port,
+    localPushPort: options.pushPort,
+    logger: options.verbose ? console.log : () => {},
+  });
+}
 
 server.listen(options.port, options.host, () => {
   pushServer.listen(options.pushPort, options.host);
 });
 
 pushServer.on("listening", () => {
+  reverseTunnel?.start();
   console.log(
-    `3gent Stage 1.5 bridge listening on http://${options.host}:${options.port}\n`
+    `3gent 0.6 hardware-test bridge listening on http://${options.host}:${options.port}\n`
     + `Pushed control: tcp://${options.host}:${options.pushPort}\n`
-    + "Adapter: deterministic fake agent\n"
+    + `Adapter: ${options.adapter === "codex" ? "Codex app-server" : "deterministic fake agent"}\n`
+    + `Transcriber: ${transcriber?.id ?? "not configured"}\n`
+    + `Relay: ${options.relayHost ?? "disabled"}\n`
     + `Audio capture: ${options.capturePath}\n`
     + `Logging: ${options.verbose
       ? `VERBOSE (${options.verbosePolls ? "including empty polls" : "empty polls hidden"})`
@@ -112,18 +249,29 @@ pushServer.on("listening", () => {
   );
 });
 
-function shutdown(): void {
-  application.shutdown();
-  let remaining = 2;
-  const closed = () => {
-    remaining -= 1;
-    if (remaining === 0) {
-      process.exit(0);
-    }
-  };
-  server.close(closed);
-  pushServer.close(closed);
+let shuttingDown = false;
+async function shutdown(): Promise<void> {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  const listenersClosed = Promise.all([
+    closeListener(server),
+    closeListener(pushServer),
+  ]);
+  for (const socket of activeSockets) {
+    socket.destroy();
+  }
+  activeSockets.clear();
+  await reverseTunnel?.close();
+  await application.shutdown();
+  await listenersClosed;
+  process.exit(0);
 }
 
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
+async function closeListener(listener: Server): Promise<void> {
+  await new Promise<void>((resolveClose) => listener.close(() => resolveClose()));
+}
+
+process.on("SIGINT", () => void shutdown());
+process.on("SIGTERM", () => void shutdown());

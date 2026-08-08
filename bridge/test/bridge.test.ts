@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,6 +16,8 @@ import {
   PROTOCOL_VERSION,
 } from "../src/protocol.js";
 import { createBridgeServer } from "../src/server.js";
+import { StaticTranscriber } from "../src/transcriber.js";
+import { PHOTO_RGB565_BYTES } from "../src/photo.js";
 
 interface TestResponse {
   status: number;
@@ -26,6 +28,8 @@ interface TestResponse {
 interface TestBridge {
   baseUrl: URL;
   capturePath: string;
+  photoPath: string;
+  directory: string;
   close: () => Promise<void>;
 }
 
@@ -40,12 +44,15 @@ async function startBridge(
 ): Promise<TestBridge> {
   const directory = await mkdtemp(join(tmpdir(), "3gent-bridge-test-"));
   const capturePath = join(directory, "latest.wav");
+  const photoPath = join(directory, "latest.bmp");
   const {application, server} = createBridgeServer({
     capturePath,
     fakeDeltaIntervalMs: 5,
     logger: options.logger ?? (() => undefined),
     verbose: options.verbose ?? false,
     verbosePolls: options.verbosePolls ?? false,
+    transcriber: new StaticTranscriber("transcribed voice prompt"),
+    photoPath,
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -55,6 +62,8 @@ async function startBridge(
   return {
     baseUrl: new URL(`http://127.0.0.1:${address.port}`),
     capturePath,
+    photoPath,
+    directory,
     close: async () => {
       application.shutdown();
       await new Promise<void>((resolve, reject) => {
@@ -191,6 +200,38 @@ test("discovers the fake session", async () => {
   }
 });
 
+test("starts and resumes sessions with idempotent command IDs", async () => {
+  const bridge = await startBridge();
+  try {
+    const headers = {
+      [COMMAND_ID_HEADER]: "cmd_session_start",
+      "Content-Type": "application/json",
+    };
+    const first = await request(bridge, "POST", "/v1/sessions", "{}", headers);
+    const replay = await request(bridge, "POST", "/v1/sessions", "{}", headers);
+    assert.equal(first.status, 201);
+    assert.equal(replay.status, 200);
+    assert.equal(parseJson(replay).duplicate, true);
+    const session = parseJson(first).session as Record<string, unknown>;
+    assert.equal(session.sessionId, FAKE_SESSION_ID);
+
+    const resumed = await request(
+      bridge,
+      "POST",
+      `/v1/sessions/${FAKE_SESSION_ID}/resume`,
+      Buffer.alloc(0),
+      {[COMMAND_ID_HEADER]: "cmd_session_resume"},
+    );
+    assert.equal(resumed.status, 202);
+    assert.equal(
+      (parseJson(resumed).session as Record<string, unknown>).sessionId,
+      FAKE_SESSION_ID,
+    );
+  } finally {
+    await bridge.close();
+  }
+});
+
 test("streams ordered fake-agent events and deduplicates commands", async () => {
   const bridge = await startBridge();
   try {
@@ -304,7 +345,7 @@ test("interrupts the active fake turn", async () => {
   }
 });
 
-test("streams PCM to a valid WAV and starts the fake audio turn", async () => {
+test("streams PCM to a valid WAV and returns a reviewed transcript without starting a turn", async () => {
   const bridge = await startBridge();
   try {
     const pcm = Buffer.from([0, 0, 16, 0, 32, 0, 48, 0]);
@@ -338,9 +379,65 @@ test("streams PCM to a valid WAV and starts the fake audio turn", async () => {
     assert.equal(wav.readUInt32LE(24), 16_364);
     assert.equal(wav.readUInt32LE(40), pcm.byteLength);
     assert.deepEqual(wav.subarray(44), pcm);
-    const {events} = await waitForEvent(bridge, "turn.completed");
+    const {events} = await waitForEvent(bridge, "capture.transcribed");
     const capture = events.find((event) => event.type === "capture.accepted");
     assert.equal(capture?.payload.kind, "audio");
+    assert.equal(
+      events.filter((event) => event.type === "capture.transcript.delta")
+        .map((event) => event.payload.text).join(""),
+      "transcribed voice prompt",
+    );
+    assert.ok(events.every((event) => event.type !== "turn.started"));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("uploads a bounded RGB565 photo and attaches it to the next prompt", async () => {
+  const bridge = await startBridge();
+  try {
+    const pixels = Buffer.alloc(PHOTO_RGB565_BYTES, 0x1f);
+    const upload = await request(
+      bridge,
+      "POST",
+      `/v1/sessions/${FAKE_SESSION_ID}/captures/photo`,
+      pixels,
+      {
+        [COMMAND_ID_HEADER]: "cmd_test_photo",
+        "Content-Type": "application/x-3gent-rgb565; width=400; height=240",
+      },
+    );
+    assert.equal(upload.status, 202);
+    const bmp = await readFile(bridge.photoPath);
+    assert.equal(bmp.subarray(0, 2).toString("ascii"), "BM");
+    assert.equal(bmp.readInt32LE(18), 400);
+    assert.equal(bmp.readInt32LE(22), -240);
+    assert.equal(bmp.byteLength, 66 + PHOTO_RGB565_BYTES);
+    assert.deepEqual(
+      (await readdir(bridge.directory)).filter((name) => name.startsWith("latest.cmd_")),
+      ["latest.cmd_test_photo.bmp"],
+    );
+
+    await request(
+      bridge,
+      "POST",
+      `/v1/sessions/${FAKE_SESSION_ID}/captures/text`,
+      "inspect this",
+      {
+        [COMMAND_ID_HEADER]: "cmd_test_photo_prompt",
+        "Content-Type": "text/plain",
+      },
+    );
+    const {events} = await waitForEvent(bridge, "turn.completed");
+    const output = events
+      .filter((event) => event.type === "assistant.text.delta")
+      .map((event) => event.payload.text).join("");
+    assert.match(output, /photo attached/);
+    assert.ok(events.some((event) => event.type === "capture.attached"));
+    assert.deepEqual(
+      (await readdir(bridge.directory)).filter((name) => name.startsWith("latest.cmd_")),
+      [],
+    );
   } finally {
     await bridge.close();
   }

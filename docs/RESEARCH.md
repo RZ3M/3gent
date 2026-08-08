@@ -667,6 +667,145 @@ the encrypted self-hosted relay. R-010 still gates that decision.
 
 ---
 
+## R-015 — Installed Codex app-server adapter
+
+**Question:** Can the desktop bridge control and observe real Codex tasks through
+the supported local structured interface without leaking Codex wire objects to
+the handheld?
+
+**Status:** HOST PASS / PHYSICAL 3DS TEST PENDING
+
+**2026-08-08 implementation record:**
+
+- The installed `codex-cli 0.144.5` accepted
+  `codex app-server --listen stdio://`. Its generated v2 TypeScript/JSON schema
+  was inspected at implementation time instead of copying an old snapshot.
+- The bridge initializes the stdio server, correlates bounded concurrent JSON-RPC
+  requests, enforces line and pending-request limits, handles split/coalesced
+  input, and fails pending work on timeouts or child exit.
+- Supported translation covers `thread/list`, `thread/start`, `thread/resume`,
+  `turn/start`, `turn/interrupt`, thread/turn state, streamed agent-message
+  deltas, completion, diff updates, errors, and command/file approvals.
+- Codex thread UUIDs are hashed into stable opaque `ses_codex_` identifiers.
+  Text deltas are split on UTF-8 character boundaries to stay inside the 640-byte
+  event limit; raw diffs become file/addition/deletion counts.
+- Approval responses are limited to one-shot accept, decline and cancel. Extended
+  permission-profile requests are rejected instead of granting broader policy.
+- A live read-only smoke test launched the installed app-server and returned 24
+  recent real Codex tasks through `/v1/sessions`; no task was modified.
+- Host result: strict TypeScript build plus 37 automated tests pass. The 3DS
+  task chooser build succeeds with devkitARM r68-1/libctru 2.7.0-1. The ELF has
+  212,156 bytes text, 7,808 bytes data and 74,576 bytes BSS; the 3DSX is 235,876
+  bytes.
+
+**Not yet proven:** session chooser usability, real response cadence, approval
+round trips, interruption, diff summaries and reconnect/resume on physical 3DS
+hardware.
+
+**Conclusion:** the real local Codex observation/control loop is ready for the
+focused Stage 2 physical checklist. Voice remains intentionally unsupported on
+this adapter until transcription and transcript review are implemented.
+
+---
+
+## R-016 — Voice transcription with handheld review
+
+**Question:** Can streamed 3DS microphone audio become a reviewed text capture
+without coupling transcription to an agent or automatically starting a turn?
+
+**Status:** HOST PASS / PHYSICAL 3DS TEST PENDING
+
+**2026-08-08 implementation record:**
+
+- The bridge saves the proven bounded PCM stream as WAV, then invokes a selected
+  transcription backend. A no-shell local command backend appends the WAV path
+  as its final argument; an optional hosted backend uses the standard multipart
+  `/v1/audio/transcriptions` API and keeps its key on the laptop.
+- Transcript output is trimmed, non-empty, and limited to 1,600 UTF-8 bytes so
+  the complete reviewed text and escaped push command remain bounded on the 3DS.
+- The bridge emits `capture.transcript.delta` followed by `capture.transcribed`.
+  It does not call an agent adapter. The handheld reconstructs and displays the
+  text, then maps `A` to send, `Y` to native-keyboard edit, and `B` to cancel.
+- Audio finalization remains non-blocking in the frame loop and gets a separate
+  120-second transcription-response deadline. Push heartbeats and agent events
+  continue on the independent control connection.
+- Host result: strict TypeScript build plus 40 tests pass, including local
+  command failure/output bounds and a local OpenAI-compatible multipart fixture.
+- Handheld build result: devkitARM r68-1/libctru 2.7.0-1 succeeds. The ELF has
+  213,692 bytes text, 7,808 bytes data and 80,472 bytes BSS; the 3DSX is 237,424
+  bytes.
+
+**Not yet proven:** real transcription latency/accuracy, 120-second finalization
+behavior, transcript reconstruction, edit/cancel/send controls, and long or
+non-ASCII transcripts on physical 3DS hardware.
+
+**Conclusion:** Stage 3 is ready for physical testing. The same transcript event
+contract works with local/self-hosted and hosted recognizers.
+
+---
+
+## R-017 — Self-hosted reverse relay feasibility
+
+**Question:** Can a self-hosted server carry the complete bidirectional and media
+protocol when the laptop is behind NAT and opens only outbound connections?
+
+**Status:** HOST PASS / REMOTE 3DS TEST PENDING / SECURITY INTENTIONALLY INCOMPLETE
+
+**2026-08-08 implementation record:**
+
+- The relay exposes separate public HTTP/media and pushed-control ports, plus
+  separate token-authenticated bridge uplink ports. The laptop offers four
+  HTTP/media tunnels and one pushed tunnel and replenishes them with 250 ms to
+  ten-second reconnect backoff.
+- Pairing is socket-for-socket and bounded to eight waiting clients/uplinks per
+  channel with 15-second waiting and five-second activation timeouts. The relay
+  never parses agent protocol content and stores no provider credential.
+- Deterministic tests pass repeated HTTP sockets, bidirectional push bytes, the
+  real bridge `/health` response and a real pushed `connection.hello` through
+  the reverse tunnel.
+- The 3DS uses the unchanged client build with the relay's numeric IPv4 and
+  public ports, so text, events, voice and photos follow the same paths.
+- Per explicit scope, the public 3DS side has no TLS or device auth. The relay
+  requires `--unsafe-public` and is not suitable for sensitive or public use.
+
+**Conclusion:** the self-hosted remote topology is host-proven and ready for a
+disposable cross-network hardware test. It does not close R-010 or D-P11.
+
+---
+
+## R-018 — 3DS photo capture and Codex attachment
+
+**Question:** Can the handheld capture, preview, upload and attach a bounded
+photo without expanding the client into an image editor?
+
+**Status:** HOST/BUILD PASS / PHYSICAL CAMERA TEST PENDING
+
+**2026-08-08 implementation record:**
+
+- The client follows the installed official devkitPro/libctru image example for
+  outer-camera activation, 400×240 RGB565 receive, shutter and cleanup. One
+  192,000-byte buffer is allocated only while the capture/preview/upload flow is
+  active.
+- `L` opens the capture flow; the top screen previews the real buffer, `A`
+  accepts and `B` cancels. Upload reuses the bounded 8 KiB media queue and pumps
+  control heartbeats/events every frame.
+- The bridge requires exactly 192,000 RGB565 bytes, writes a 66-byte bitfield BMP
+  header plus pixels atomically, and retains one pending photo per session.
+- The next successful prompt consumes the photo. Codex receives it as app-server
+  `localImage`; the fake adapter exposes the same attachment behavior in tests.
+- Host result: the full strict bridge suite passes 44 tests. Handheld clean build
+  succeeds with devkitARM r68-1/libctru 2.7.0-1. The ELF has 219,332 bytes text,
+  7,808 bytes data and 80,776 bytes BSS; the 3DSX is 243,212 bytes.
+
+**Not yet proven:** camera service coexistence with MICU, capture orientation and
+color masks on hardware, preview correctness, upload latency, BMP appearance,
+and real Codex visual interpretation.
+
+**Conclusion:** photo functionality is ready for the physical checklist; sketch
+capture remains deliberately excluded.
+
+---
+
 ## Experiment template
 
 When closing a research item, add:

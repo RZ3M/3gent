@@ -102,8 +102,7 @@ desktop bridge remains authoritative over workspace and policy choices.
 Releasing push-to-talk uploads and transcribes the capture, then shows the
 transcript on the 3DS. A separate explicit button sends it to the agent. The
 user can cancel and may edit through the native keyboard where practical.
-This is the accepted Stage 3 target; the current fake adapter still starts a
-mock turn immediately after audio upload and does not yet implement it.
+Version `0.3.0-stage3` implements this behavior for both fake and real adapters.
 
 ### D-016 — Self-hosted relay first
 
@@ -119,6 +118,28 @@ functional product.
 
 Photo capture and attachment are included after the core agent loop. Stylus
 sketch capture is outside the current goal and may be revisited later.
+
+### D-018 — Codex app-server translation boundary
+
+**Status:** Accepted
+
+The initial Codex adapter spawns the installed `codex app-server` over stdio,
+inspects the installed schema, and translates only supported v2 methods/events
+at the desktop boundary. Codex thread UUIDs are replaced by deterministic opaque
+3gent session IDs. Remote approvals expose only one-shot accept, decline and
+cancel; session-wide policy amendments and extended permission profiles remain
+desktop-only.
+
+### D-019 — Reverse relay for the self-hosted hardware test
+
+**Status:** Accepted as a reversible test only
+
+The first remote feasibility build uses a small self-hosted reverse TCP relay so
+the laptop opens outbound uplinks and the 3DS can reach both HTTP media/session
+traffic and pushed control. Bridge uplinks use a bounded token and connection
+pool. Per explicit current scope, the 3DS-facing side remains unauthenticated
+plaintext and the relay requires `--unsafe-public`; this is not acceptance of a
+production transport and must be replaced or secured before release.
 
 ---
 

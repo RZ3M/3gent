@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 
+import type { AgentAdapter } from "../src/agent-adapter.js";
 import { EventStore } from "../src/event-store.js";
 import { FAKE_SESSION_ID } from "../src/fake-agent.js";
 import {
@@ -12,6 +13,7 @@ import {
   MAX_PUSH_FRAME_BYTES,
 } from "../src/push-server.js";
 import { BridgeApplication } from "../src/server.js";
+import type { SessionSummary } from "../src/protocol.js";
 
 interface Frame {
   protocolVersion: number;
@@ -337,6 +339,56 @@ test("disconnects a client that sends no heartbeat", async () => {
   }
 });
 
+test("continues processing heartbeats while an adapter command is slow", async () => {
+  const events = new EventStore();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const adapter: AgentAdapter = {
+    id: "delayed",
+    listSessions: () => [delayedSession(events)],
+    session: (sessionId) => sessionId === FAKE_SESSION_ID ? delayedSession(events) : undefined,
+    startSession: async () => delayedSession(events),
+    resumeSession: async () => delayedSession(events),
+    submitText: async () => await gate,
+    interrupt: async () => {},
+    respondToApproval: async () => {},
+    shutdown: async () => {},
+  };
+  const application = new BridgeApplication({adapter, events, logger: () => {}});
+  const server = createPushControlServer(application, {
+    clientIdleTimeoutMs: 80,
+    logger: () => {},
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const client = new TestClient((server.address() as AddressInfo).port);
+  try {
+    await client.connected();
+    client.send(hello());
+    await client.waitFor((frame) => frame.type === "connection.ready");
+    client.send({
+      protocolVersion: 1,
+      type: "command",
+      commandId: "cmd_slow_adapter",
+      command: {type: "capture.text", text: "slow"},
+    });
+    for (let nonce = 1; nonce <= 6; nonce += 1) {
+      await delay(25);
+      client.send({protocolVersion: 1, type: "ping", nonce});
+    }
+    await client.waitFor((frame) => frame.type === "pong" && frame.nonce === 6);
+    release();
+    await client.waitFor((frame) => frame.type === "command.ack");
+  } finally {
+    release();
+    client.close();
+    await application.shutdown();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 test("event history enforces its byte budget", () => {
   const events = new EventStore(256, 900);
   for (let index = 0; index < 10; index += 1) {
@@ -426,3 +478,15 @@ test("noisy transport logging includes heartbeat frames", async () => {
     await fixture.close();
   }
 });
+
+function delayedSession(events: EventStore): SessionSummary {
+  return {
+    sessionId: FAKE_SESSION_ID,
+    label: "Delayed adapter",
+    adapter: "delayed",
+    state: "idle",
+    activeTurnId: null,
+    pendingApprovalId: null,
+    lastSequence: events.latestSequence(FAKE_SESSION_ID),
+  };
+}

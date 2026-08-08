@@ -1,6 +1,5 @@
 import { createServer, type Server, type Socket } from "node:net";
 
-import { FAKE_SESSION_ID } from "./fake-agent.js";
 import {
   EVENT_HISTORY_LIMIT,
   isIdentifier,
@@ -42,6 +41,7 @@ class PushConnection {
   #sessionId: string | null = null;
   #sendCursor = 0;
   #blocked = false;
+  #commandProcessing = false;
   #closed = false;
   #lastInboundAt = Date.now();
   #unsubscribe: (() => void) | null = null;
@@ -82,7 +82,14 @@ class PushConnection {
     }
     this.#lastInboundAt = Date.now();
     this.#input = Buffer.concat([this.#input, chunk]);
+    if (this.#input.byteLength > (MAX_PUSH_FRAME_BYTES + 1) * 2) {
+      this.#fail(new ProtocolError(413, "FRAME_TOO_LARGE", "control input exceeds 8 KiB"), true);
+      return;
+    }
+    this.#processInput();
+  }
 
+  #processInput(): void {
     for (;;) {
       const newline = this.#input.indexOf(0x0a);
       if (newline < 0) {
@@ -132,7 +139,18 @@ class PushConnection {
       } else if (parsed.type === "ping") {
         this.#handlePing(parsed);
       } else if (parsed.type === "command") {
-        this.#handleCommand(parsed);
+        if (this.#commandProcessing) {
+          throw new ProtocolError(409, "COMMAND_BUSY", "another control command is still processing", true);
+        }
+        this.#commandProcessing = true;
+        void this.#handleCommand(parsed).catch((error: unknown) => {
+          const protocolError = error instanceof ProtocolError
+            ? error
+            : new ProtocolError(500, "INTERNAL_ERROR", "push command failed");
+          this.#fail(protocolError, false);
+        }).finally(() => {
+          this.#commandProcessing = false;
+        });
       } else {
         throw new ProtocolError(400, "UNKNOWN_FRAME_TYPE", "unknown control frame type");
       }
@@ -201,7 +219,7 @@ class PushConnection {
     });
   }
 
-  #handleCommand(frame: RecordValue): void {
+  async #handleCommand(frame: RecordValue): Promise<void> {
     if (this.#sessionId === null) {
       throw new ProtocolError(409, "HELLO_REQUIRED", "connection hello is required first");
     }
@@ -219,7 +237,7 @@ class PushConnection {
       if (typeof command.text !== "string") {
         throw new ProtocolError(400, "INVALID_TEXT_CAPTURE", "text capture is invalid");
       }
-      execution = this.#application.submitTextCommand(
+      execution = await this.#application.submitTextCommand(
         this.#sessionId,
         commandId,
         command.text,
@@ -229,13 +247,13 @@ class PushConnection {
         + `${Buffer.byteLength(command.text, "utf8")} bytes`,
       );
     } else if (command.type === "turn.interrupt") {
-      execution = this.#application.interruptCommand(this.#sessionId, commandId);
+      execution = await this.#application.interruptCommand(this.#sessionId, commandId);
       this.#logger(`push interrupt ${execution.duplicate ? "replayed" : "accepted"}`);
     } else if (command.type === "approval.respond") {
       if (typeof command.approvalId !== "string" || !isApprovalChoice(command.choice)) {
         throw new ProtocolError(400, "INVALID_APPROVAL_RESPONSE", "approval response is invalid");
       }
-      execution = this.#application.approvalCommand(
+      execution = await this.#application.approvalCommand(
         this.#sessionId,
         commandId,
         command.approvalId,

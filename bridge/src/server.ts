@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 
+import type { AgentAdapter } from "./agent-adapter.js";
 import { CommandRegistry } from "./command-registry.js";
 import { EventStore } from "./event-store.js";
-import { FAKE_SESSION_ID, FakeAgent } from "./fake-agent.js";
+import { FakeAgentAdapter } from "./fake-agent-adapter.js";
 import {
   encodeEventBatch,
   isIdentifier,
@@ -17,22 +20,38 @@ import {
   requireProtocolVersion,
   sendJson,
   type CommandAcknowledgement,
+  type SessionSummary,
 } from "./protocol.js";
 import { savePcmRequestAsWav } from "./wav.js";
+import type { Transcriber } from "./transcriber.js";
+import {
+  immutablePhotoPath,
+  publishLatestPhoto,
+  saveRgb565RequestAsBmp,
+} from "./photo.js";
 
 const DEFAULT_CAPTURE_PATH = resolve("data", "latest.wav");
+const DEFAULT_PHOTO_PATH = resolve("data", "latest.bmp");
 const SESSION_PATH = /^\/v1\/sessions\/([^/]+)$/;
+const SESSION_RESUME_PATH = /^\/v1\/sessions\/([^/]+)\/resume$/;
 const TEXT_CAPTURE_PATH = /^\/v1\/sessions\/([^/]+)\/captures\/text$/;
 const AUDIO_CAPTURE_PATH = /^\/v1\/sessions\/([^/]+)\/captures\/audio$/;
+const PHOTO_CAPTURE_PATH = /^\/v1\/sessions\/([^/]+)\/captures\/photo$/;
 const INTERRUPT_PATH = /^\/v1\/sessions\/([^/]+)\/turns\/current\/interrupt$/;
 const APPROVAL_PATH = /^\/v1\/sessions\/([^/]+)\/approvals\/([^/]+)\/respond$/;
+const MAX_REVIEW_TRANSCRIPT_BYTES = 1600;
 
-interface BridgeServerOptions {
+export interface BridgeServerOptions {
+  adapter?: AgentAdapter;
+  events?: EventStore;
   capturePath?: string;
   fakeDeltaIntervalMs?: number;
   logger?: (message: string) => void;
   verbose?: boolean;
   verbosePolls?: boolean;
+  defaultCwd?: string;
+  transcriber?: Transcriber;
+  photoPath?: string;
 }
 
 export interface CommandExecution {
@@ -41,21 +60,33 @@ export interface CommandExecution {
 }
 
 export class BridgeApplication {
-  public readonly events = new EventStore();
-  public readonly fakeAgent: FakeAgent;
+  public readonly events: EventStore;
+  public readonly adapter: AgentAdapter;
   readonly #commands = new CommandRegistry();
+  readonly #inFlightCommands = new Map<string, Promise<CommandAcknowledgement>>();
+  readonly #sessionCommandResults = new Map<string, SessionSummary>();
+  readonly #inFlightSessionCommands = new Map<string, Promise<SessionSummary>>();
   readonly #capturePath: string;
   readonly #logger: (message: string) => void;
   readonly #verbose: boolean;
   readonly #verbosePolls: boolean;
+  readonly #defaultCwd: string;
+  readonly #transcriber: Transcriber | undefined;
+  readonly #photoPath: string;
+  readonly #pendingPhotos = new Map<string, string>();
   #audioCaptureActive = false;
+  #photoCaptureActive = false;
 
   public constructor(options: BridgeServerOptions = {}) {
+    this.events = options.events ?? new EventStore();
     this.#capturePath = options.capturePath ?? DEFAULT_CAPTURE_PATH;
     this.#logger = options.logger ?? console.log;
     this.#verbosePolls = options.verbosePolls ?? false;
     this.#verbose = (options.verbose ?? false) || this.#verbosePolls;
-    this.fakeAgent = new FakeAgent(
+    this.#defaultCwd = options.defaultCwd ?? process.cwd();
+    this.#transcriber = options.transcriber;
+    this.#photoPath = options.photoPath ?? DEFAULT_PHOTO_PATH;
+    this.adapter = options.adapter ?? new FakeAgentAdapter(
       this.events,
       options.fakeDeltaIntervalMs ?? 80,
     );
@@ -76,7 +107,7 @@ export class BridgeApplication {
         this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
           status: "ready",
-          bridge: "3gent-stage1.5",
+          bridge: "3gent-0.6-hwtest",
         });
         return;
       }
@@ -87,9 +118,40 @@ export class BridgeApplication {
       requireProtocolVersion(request.headers);
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
+        const limit = url.searchParams.has("limit")
+          ? parseBoundedInteger(url.searchParams.get("limit"), "limit", 1, 16)
+          : 8;
+        const offset = url.searchParams.has("cursor")
+          ? parseBoundedInteger(url.searchParams.get("cursor"), "cursor", 0, 10_000)
+          : 0;
+        const allSessions = this.adapter.listSessions();
+        const sessions = allSessions.slice(offset, offset + limit);
+        const nextCursor = offset + sessions.length < allSessions.length
+          ? String(offset + sessions.length)
+          : null;
         this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
-          sessions: [this.fakeAgent.session()],
+          sessions,
+          nextCursor,
+        });
+        return;
+      }
+      if (url.pathname === "/v1/sessions" && request.method === "POST") {
+        const commandId = requireCommandId(request.headers);
+        const body = await readJsonObject(request, 1024);
+        const cwd = body.cwd ?? this.#defaultCwd;
+        if (typeof cwd !== "string" || cwd.trim().length === 0 || Buffer.byteLength(cwd) > 768) {
+          throw new ProtocolError(400, "INVALID_CWD", "cwd must be a non-empty bounded string");
+        }
+        const result = await this.#executeSessionCommand(
+          commandId,
+          async () => await this.adapter.startSession({cwd}),
+        );
+        this.#sendJson(response, result.duplicate ? 200 : 201, {
+          protocolVersion: PROTOCOL_VERSION,
+          commandId,
+          duplicate: result.duplicate,
+          session: result.session,
         });
         return;
       }
@@ -100,34 +162,64 @@ export class BridgeApplication {
 
       const sessionMatch = SESSION_PATH.exec(url.pathname);
       if (sessionMatch !== null && request.method === "GET") {
-        this.#requireFakeSession(sessionMatch[1]);
+        const session = this.session(sessionMatch[1] ?? "");
         this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
-          session: this.fakeAgent.session(),
+          session,
+        });
+        return;
+      }
+
+      const resumeMatch = SESSION_RESUME_PATH.exec(url.pathname);
+      if (resumeMatch !== null && request.method === "POST") {
+        const sessionId = resumeMatch[1] ?? "";
+        this.session(sessionId);
+        await drainBody(request, 0);
+        const commandId = requireCommandId(request.headers);
+        const result = await this.#executeSessionCommand(
+          commandId,
+          async () => await this.adapter.resumeSession(sessionId),
+        );
+        this.#sendJson(response, result.duplicate ? 200 : 202, {
+          protocolVersion: PROTOCOL_VERSION,
+          commandId,
+          duplicate: result.duplicate,
+          session: result.session,
         });
         return;
       }
 
       const textMatch = TEXT_CAPTURE_PATH.exec(url.pathname);
       if (textMatch !== null && request.method === "POST") {
-        this.#requireFakeSession(textMatch[1]);
-        await this.#submitText(request, response);
+        const sessionId = textMatch[1] ?? "";
+        this.session(sessionId);
+        await this.#submitText(request, response, sessionId);
         return;
       }
 
       const audioMatch = AUDIO_CAPTURE_PATH.exec(url.pathname);
       if (audioMatch !== null && request.method === "POST") {
-        this.#requireFakeSession(audioMatch[1]);
-        await this.#submitAudio(request, response);
+        const sessionId = audioMatch[1] ?? "";
+        this.session(sessionId);
+        await this.#submitAudio(request, response, sessionId);
+        return;
+      }
+
+      const photoMatch = PHOTO_CAPTURE_PATH.exec(url.pathname);
+      if (photoMatch !== null && request.method === "POST") {
+        const sessionId = photoMatch[1] ?? "";
+        this.session(sessionId);
+        await this.#submitPhoto(request, response, sessionId);
         return;
       }
 
       const interruptMatch = INTERRUPT_PATH.exec(url.pathname);
       if (interruptMatch !== null && request.method === "POST") {
-        this.#requireFakeSession(interruptMatch[1]);
+        const sessionId = interruptMatch[1] ?? "";
+        this.session(sessionId);
         await drainBody(request, 0);
-        const execution = this.interruptCommand(
-          FAKE_SESSION_ID,
+        const execution = await this.interruptCommand(
+          sessionId,
           requireCommandId(request.headers),
         );
         this.#sendAcknowledgement(response, execution);
@@ -139,12 +231,13 @@ export class BridgeApplication {
 
       const approvalMatch = APPROVAL_PATH.exec(url.pathname);
       if (approvalMatch !== null && request.method === "POST") {
-        this.#requireFakeSession(approvalMatch[1]);
+        const sessionId = approvalMatch[1] ?? "";
+        this.session(sessionId);
         const approvalId = approvalMatch[2];
         if (approvalId === undefined || !isIdentifier(approvalId, "apr")) {
           throw new ProtocolError(400, "INVALID_APPROVAL_ID", "invalid approval ID");
         }
-        await this.#respondToApproval(request, response, approvalId);
+        await this.#respondToApproval(request, response, sessionId, approvalId);
         return;
       }
 
@@ -168,56 +261,93 @@ export class BridgeApplication {
     }
   }
 
-  public shutdown(): void {
-    this.fakeAgent.shutdown();
+  public async shutdown(): Promise<void> {
+    await this.adapter.shutdown();
+    await Promise.all(
+      [...this.#pendingPhotos.values()].map(async (path) => await this.#removePhoto(path)),
+    );
+    this.#pendingPhotos.clear();
   }
 
-  public session(sessionId: string): ReturnType<FakeAgent["session"]> {
-    this.#requireFakeSession(sessionId);
-    return this.fakeAgent.session();
+  public session(sessionId: string) {
+    const session = this.adapter.session(sessionId);
+    if (session === undefined) {
+      throw new ProtocolError(404, "SESSION_NOT_FOUND", "session does not exist");
+    }
+    return session;
   }
 
   public eventsAfter(sessionId: string, after: number, limit: number) {
-    this.#requireFakeSession(sessionId);
+    this.session(sessionId);
     return this.events.after(sessionId, after, limit);
   }
 
-  public submitTextCommand(
+  public async submitTextCommand(
     sessionId: string,
     commandId: string,
     text: string,
-  ): CommandExecution {
-    this.#requireFakeSession(sessionId);
+  ): Promise<CommandExecution> {
+    this.session(sessionId);
     if (Buffer.byteLength(text, "utf8") > MAX_TEXT_CAPTURE_BYTES) {
       throw new ProtocolError(413, "BODY_TOO_LARGE", "text capture exceeds its limit");
     }
     if (text.trim().length === 0) {
       throw new ProtocolError(400, "EMPTY_TEXT_CAPTURE", "text capture is empty");
     }
-    return this.#executeCommand(commandId, () => this.fakeAgent.submitText(text));
+    return await this.#executeCommand(
+      sessionId,
+      commandId,
+      async () => {
+        const photoPath = this.#pendingPhotos.get(sessionId);
+        await this.adapter.submitText(
+          sessionId,
+          text,
+          photoPath === undefined ? [] : [{kind: "photo", path: photoPath}],
+        );
+        if (photoPath !== undefined) {
+          if (this.#pendingPhotos.get(sessionId) === photoPath) {
+            this.#pendingPhotos.delete(sessionId);
+          }
+          await this.#removePhoto(photoPath);
+          this.events.append(sessionId, "capture.attached", {
+            kind: "photo",
+            filename: "latest.bmp",
+          });
+        }
+      },
+    );
   }
 
-  public interruptCommand(
+  public async interruptCommand(
     sessionId: string,
     commandId: string,
-  ): CommandExecution {
-    this.#requireFakeSession(sessionId);
-    return this.#executeCommand(commandId, () => this.fakeAgent.interrupt());
+  ): Promise<CommandExecution> {
+    this.session(sessionId);
+    return await this.#executeCommand(
+      sessionId,
+      commandId,
+      async () => await this.adapter.interrupt(sessionId),
+    );
   }
 
-  public approvalCommand(
+  public async approvalCommand(
     sessionId: string,
     commandId: string,
     approvalId: string,
     choice: "approve_once" | "decline" | "cancel",
-  ): CommandExecution {
-    this.#requireFakeSession(sessionId);
+  ): Promise<CommandExecution> {
+    this.session(sessionId);
     if (!isIdentifier(approvalId, "apr")) {
       throw new ProtocolError(400, "INVALID_APPROVAL_ID", "invalid approval ID");
     }
-    return this.#executeCommand(
+    return await this.#executeCommand(
+      sessionId,
       commandId,
-      () => this.fakeAgent.respondToApproval(approvalId, choice),
+      async () => await this.adapter.respondToApproval(
+        sessionId,
+        approvalId,
+        choice,
+      ),
     );
   }
 
@@ -227,10 +357,13 @@ export class BridgeApplication {
     response: ServerResponse,
   ): void {
     const sessionId = url.searchParams.get("sessionId");
-    this.#requireFakeSession(sessionId ?? undefined);
+    if (sessionId === null) {
+      throw new ProtocolError(400, "INVALID_QUERY", "sessionId is required");
+    }
+    this.session(sessionId);
     const after = parseBoundedInteger(url.searchParams.get("after"), "after", 0, Number.MAX_SAFE_INTEGER);
     const limit = parseBoundedInteger(url.searchParams.get("limit"), "limit", 1, MAX_EVENT_POLL_LIMIT);
-    const events = this.events.after(FAKE_SESSION_ID, after, limit);
+    const events = this.events.after(sessionId, after, limit);
     const encoded = encodeEventBatch(events);
     if (events.length > 0 || this.#verbosePolls) {
       this.#logRequest(request, url);
@@ -253,6 +386,7 @@ export class BridgeApplication {
   async #submitText(
     request: IncomingMessage,
     response: ServerResponse,
+    sessionId: string,
   ): Promise<void> {
     const contentType = request.headers["content-type"]?.toLowerCase() ?? "";
     if (!contentType.startsWith("text/plain")) {
@@ -261,8 +395,8 @@ export class BridgeApplication {
     const body = await drainBody(request, MAX_TEXT_CAPTURE_BYTES);
     const text = body.toString("utf8");
     this.#verboseLog(`3DS -> bridge text ${JSON.stringify(text)}`);
-    const execution = this.submitTextCommand(
-      FAKE_SESSION_ID,
+    const execution = await this.submitTextCommand(
+      sessionId,
       requireCommandId(request.headers),
       text,
     );
@@ -275,6 +409,7 @@ export class BridgeApplication {
   async #submitAudio(
     request: IncomingMessage,
     response: ServerResponse,
+    sessionId: string,
   ): Promise<void> {
     const contentType = request.headers["content-type"]?.toLowerCase() ?? "";
     const validContentType = contentType.includes("application/x-3gent-pcm")
@@ -313,12 +448,11 @@ export class BridgeApplication {
         true,
       );
     }
-    if (this.fakeAgent.session().activeTurnId !== null) {
+    if (this.#transcriber === undefined) {
       throw new ProtocolError(
-        409,
-        "SESSION_BUSY",
-        "session already has an active turn",
-        true,
+        503,
+        "TRANSCRIPTION_NOT_CONFIGURED",
+        "bridge transcription is not configured",
       );
     }
 
@@ -334,9 +468,35 @@ export class BridgeApplication {
           )
           : undefined,
       );
-      this.fakeAgent.submitAudio(byteLength);
-      this.#sendNewAcknowledgement(response, commandId);
-      this.#logger(`audio capture accepted: ${byteLength} PCM bytes`);
+      const captureId = `cap_${randomUUID()}`;
+      this.events.append(sessionId, "capture.accepted", {
+        captureId,
+        kind: "audio",
+        bytes: byteLength,
+        transcriber: this.#transcriber.id,
+      });
+      const transcript = await this.#transcriber.transcribe(this.#capturePath);
+      if (Buffer.byteLength(transcript, "utf8") > MAX_REVIEW_TRANSCRIPT_BYTES) {
+        throw new ProtocolError(
+          413,
+          "TRANSCRIPT_TOO_LARGE",
+          `transcript exceeds the ${MAX_REVIEW_TRANSCRIPT_BYTES}-byte handheld review limit`,
+        );
+      }
+      for (const text of splitUtf8(transcript, 280)) {
+        this.events.append(sessionId, "capture.transcript.delta", {
+          captureId,
+          text,
+        });
+      }
+      this.events.append(sessionId, "capture.transcribed", {
+        captureId,
+        bytes: Buffer.byteLength(transcript, "utf8"),
+      });
+      this.#sendNewAcknowledgement(response, commandId, sessionId);
+      this.#logger(
+        `audio capture transcribed: ${byteLength} PCM bytes, ${Buffer.byteLength(transcript, "utf8")} text bytes`,
+      );
     } finally {
       this.#audioCaptureActive = false;
     }
@@ -345,6 +505,7 @@ export class BridgeApplication {
   async #respondToApproval(
     request: IncomingMessage,
     response: ServerResponse,
+    sessionId: string,
     approvalId: string,
   ): Promise<void> {
     const body = await drainBody(request, 256);
@@ -361,8 +522,8 @@ export class BridgeApplication {
     if (choice !== "approve_once" && choice !== "decline" && choice !== "cancel") {
       throw new ProtocolError(400, "INVALID_APPROVAL_CHOICE", "approval choice is not allowed");
     }
-    const execution = this.approvalCommand(
-      FAKE_SESSION_ID,
+    const execution = await this.approvalCommand(
+      sessionId,
       requireCommandId(request.headers),
       approvalId,
       choice,
@@ -373,10 +534,71 @@ export class BridgeApplication {
     );
   }
 
-  #executeCommand(
+  async #submitPhoto(
+    request: IncomingMessage,
+    response: ServerResponse,
+    sessionId: string,
+  ): Promise<void> {
+    const contentType = request.headers["content-type"]?.toLowerCase() ?? "";
+    if (!contentType.includes("application/x-3gent-rgb565")
+      || !contentType.includes("width=400") || !contentType.includes("height=240")) {
+      throw new ProtocolError(
+        415,
+        "INVALID_PHOTO_FORMAT",
+        "expected RGB565 400x240 photo",
+      );
+    }
+    const commandId = requireCommandId(request.headers);
+    const duplicate = this.#commands.get(commandId);
+    if (duplicate !== undefined) {
+      await discardBody(request, 400 * 240 * 2);
+      this.#sendJson(response, 200, duplicate);
+      return;
+    }
+    if (this.#photoCaptureActive) {
+      throw new ProtocolError(409, "PHOTO_CAPTURE_BUSY", "another photo upload is active", true);
+    }
+    this.#photoCaptureActive = true;
+    const capturePath = immutablePhotoPath(this.#photoPath, commandId);
+    try {
+      const byteLength = await saveRgb565RequestAsBmp(request, capturePath);
+      await publishLatestPhoto(capturePath, this.#photoPath);
+      const replaced = this.#pendingPhotos.get(sessionId);
+      this.#pendingPhotos.set(sessionId, capturePath);
+      if (replaced !== undefined && replaced !== capturePath) {
+        await this.#removePhoto(replaced);
+      }
+      this.events.append(sessionId, "capture.photo.ready", {
+        kind: "photo",
+        width: 400,
+        height: 240,
+        bytes: byteLength,
+      });
+      this.#sendNewAcknowledgement(response, commandId, sessionId);
+      this.#logger(`photo capture accepted: ${byteLength} RGB565 bytes`);
+    } catch (error) {
+      await this.#removePhoto(capturePath);
+      throw error;
+    } finally {
+      this.#photoCaptureActive = false;
+    }
+  }
+
+  async #removePhoto(path: string): Promise<void> {
+    try {
+      await rm(path, {force: true});
+    } catch (error) {
+      this.#logger(
+        `photo cleanup warning: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    }
+  }
+
+  async #executeCommand(
+    sessionId: string,
     commandId: string,
-    action: () => void,
-  ): CommandExecution {
+    action: () => Promise<void>,
+  ): Promise<CommandExecution> {
     if (!isIdentifier(commandId, "cmd")) {
       throw new ProtocolError(400, "INVALID_COMMAND_ID", "invalid command ID");
     }
@@ -384,17 +606,62 @@ export class BridgeApplication {
     if (duplicate !== undefined) {
       return {acknowledgement: duplicate, duplicate: true};
     }
-    action();
-    const acknowledgement: CommandAcknowledgement = {
-      protocolVersion: PROTOCOL_VERSION,
-      commandId,
-      accepted: true,
-      duplicate: false,
-      sessionId: FAKE_SESSION_ID,
-      lastSequence: this.events.latestSequence(FAKE_SESSION_ID),
-    };
-    this.#commands.remember(acknowledgement);
-    return {acknowledgement, duplicate: false};
+    const inFlight = this.#inFlightCommands.get(commandId);
+    if (inFlight !== undefined) {
+      return {acknowledgement: await inFlight, duplicate: true};
+    }
+    const operation = (async (): Promise<CommandAcknowledgement> => {
+      await action();
+      const acknowledgement: CommandAcknowledgement = {
+        protocolVersion: PROTOCOL_VERSION,
+        commandId,
+        accepted: true,
+        duplicate: false,
+        sessionId,
+        lastSequence: this.events.latestSequence(sessionId),
+      };
+      this.#commands.remember(acknowledgement);
+      return acknowledgement;
+    })();
+    this.#inFlightCommands.set(commandId, operation);
+    try {
+      return {acknowledgement: await operation, duplicate: false};
+    } finally {
+      this.#inFlightCommands.delete(commandId);
+    }
+  }
+
+  async #executeSessionCommand(
+    commandId: string,
+    action: () => Promise<SessionSummary>,
+  ): Promise<{session: SessionSummary; duplicate: boolean}> {
+    if (!isIdentifier(commandId, "cmd")) {
+      throw new ProtocolError(400, "INVALID_COMMAND_ID", "invalid command ID");
+    }
+    const stored = this.#sessionCommandResults.get(commandId);
+    if (stored !== undefined) {
+      return {session: stored, duplicate: true};
+    }
+    const inFlight = this.#inFlightSessionCommands.get(commandId);
+    if (inFlight !== undefined) {
+      return {session: await inFlight, duplicate: true};
+    }
+    const operation = action();
+    this.#inFlightSessionCommands.set(commandId, operation);
+    try {
+      const session = await operation;
+      this.#sessionCommandResults.set(commandId, session);
+      while (this.#sessionCommandResults.size > 256) {
+        const oldest = this.#sessionCommandResults.keys().next().value as string | undefined;
+        if (oldest === undefined) {
+          break;
+        }
+        this.#sessionCommandResults.delete(oldest);
+      }
+      return {session, duplicate: false};
+    } finally {
+      this.#inFlightSessionCommands.delete(commandId);
+    }
   }
 
   #sendAcknowledgement(
@@ -411,14 +678,15 @@ export class BridgeApplication {
   #sendNewAcknowledgement(
     response: ServerResponse,
     commandId: string,
+    sessionId: string,
   ): void {
     const acknowledgement: CommandAcknowledgement = {
       protocolVersion: PROTOCOL_VERSION,
       commandId,
       accepted: true,
       duplicate: false,
-      sessionId: FAKE_SESSION_ID,
-      lastSequence: this.events.latestSequence(FAKE_SESSION_ID),
+      sessionId,
+      lastSequence: this.events.latestSequence(sessionId),
     };
     this.#commands.remember(acknowledgement);
     this.#sendJson(response, 202, acknowledgement);
@@ -451,11 +719,6 @@ export class BridgeApplication {
     }
   }
 
-  #requireFakeSession(sessionId: string | undefined): void {
-    if (sessionId !== FAKE_SESSION_ID) {
-      throw new ProtocolError(404, "SESSION_NOT_FOUND", "session does not exist");
-    }
-  }
 }
 
 export function createBridgeServer(options: BridgeServerOptions = {}): {
@@ -496,6 +759,26 @@ async function drainBody(
   return Buffer.concat(chunks, total);
 }
 
+async function readJsonObject(
+  request: IncomingMessage,
+  maximumBytes: number,
+): Promise<Record<string, unknown>> {
+  const contentType = request.headers["content-type"]?.toLowerCase() ?? "";
+  if (!contentType.startsWith("application/json")) {
+    throw new ProtocolError(415, "INVALID_CONTENT_TYPE", "application/json required");
+  }
+  const body = await drainBody(request, maximumBytes);
+  try {
+    const value: unknown = JSON.parse(body.toString("utf8"));
+    if (!isRecord(value)) {
+      throw new Error("not an object");
+    }
+    return value;
+  } catch {
+    throw new ProtocolError(400, "INVALID_JSON", "request body must be a JSON object");
+  }
+}
+
 async function discardBody(
   request: IncomingMessage,
   maximumBytes: number,
@@ -529,4 +812,24 @@ function parseBoundedInteger(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function splitUtf8(text: string, maximumBytes: number): string[] {
+  const pieces: string[] = [];
+  let current = "";
+  let bytes = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > maximumBytes && current.length > 0) {
+      pieces.push(current);
+      current = "";
+      bytes = 0;
+    }
+    current += character;
+    bytes += size;
+  }
+  if (current.length > 0) {
+    pieces.push(current);
+  }
+  return pieces;
 }

@@ -18,7 +18,7 @@ jobs:
       - name: Install bridge dependencies
         run: npm ci
         working-directory: bridge
-      - name: Build and test the Stage 1.5 bridge
+      - name: Build and test the functional bridge core
         run: npm test
         working-directory: bridge
 
@@ -41,7 +41,7 @@ jobs:
         run: make -C client-3ds SERVER_HOST=192.0.2.1 SERVER_PORT=8080 PUSH_PORT=8081
       - uses: actions/upload-artifact@v7
         with:
-          name: 3gent-stage1.5
+          name: 3gent-hardware-test
           path: |
             client-3ds/3gent.3dsx
             client-3ds/3gent.smdh

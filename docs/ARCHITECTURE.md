@@ -121,6 +121,14 @@ independent HTTP stream. Every runtime operation advances asynchronously in the
 handheld frame loop. This local framing experiment is not the final encrypted
 remote transport.
 
+Version `0.2.0-stage2` adds a real Codex adapter without changing the handheld
+event contract. The bridge spawns the installed `codex app-server` over stdio,
+performs bounded JSON-RPC/JSONL request correlation, discovers recent threads,
+and translates task state, streamed agent messages, turn completion, errors,
+diff counts and approval callbacks. Deterministic opaque 3gent session IDs keep
+Codex UUIDs and schemas at the adapter boundary. The fake adapter remains the
+deterministic hardware and failure-testing fixture.
+
 ### Responsibilities
 
 - agent process/session integration;
@@ -187,19 +195,24 @@ failed
 Normalized events may include:
 
 ```text
-session.started
+connection.ready
 session.updated
 turn.started
 turn.completed
 assistant.text.delta
 assistant.text.completed
-agent.status.changed
 approval.requested
 approval.resolved
-diff.updated
-capture.upload.progress
-session.error
+turn.diff.updated
+capture.progress
+error
 ```
+
+The current functional-core monitoring contract is deliberately bounded:
+session state, streamed agent text, diff counts, approvals, errors and turn
+completion. Raw terminal output and detailed Codex tool/item lifecycles stay on
+the laptop until a later UI decision establishes a useful, agent-agnostic
+small-screen summary.
 
 ## 5. Codex adapter
 
@@ -335,6 +348,30 @@ heartbeat/liveness, reconnect with jitter, and cursor resume. Sequence numbers,
 command IDs, replay, and deduplication remain application-protocol properties
 across either WSS or raw TLS.
 
+### Hardware-test reverse relay
+
+Version `0.6.0-hwtest` implements a reversible plaintext feasibility path. The
+self-hosted relay has distinct public HTTP/media and pushed-control ports plus
+distinct authenticated bridge-uplink ports. The desktop bridge maintains four
+outbound HTTP/media tunnel offers and one outbound pushed-control offer; the
+relay pairs one public socket to one offer and then becomes a bounded byte
+forwarder. This handles NAT on the laptop side and preserves the exact local
+bidirectional protocol.
+
+This implementation is not the production answer to D-P11. The public 3DS side
+has no device authentication or TLS, deliberately requires an unsafe flag, and
+exists only because production security was excluded from the current hardware
+goal. Pairing and secure framing remain mandatory before release.
+
+### Photo capture path
+
+The handheld's outer camera produces exactly 400×240 RGB565. After preview and
+confirmation, the shared bounded media queue uploads 192,000 bytes. The bridge
+constructs a standard bitfield BMP, retains at most one pending photo per
+session, and consumes it on the next successful text/transcript prompt. Agent
+adapters receive an agent-agnostic photo attachment; Codex maps it to a
+`localImage` turn input.
+
 ## 9. QR pairing
 
 Default pairing UX:
@@ -431,5 +468,6 @@ tools/
   fixtures/
 ```
 
-Create a boundary only when its stage needs it; `relay/` and production adapter
-directories remain deferred.
+The current relay implementation lives beside the bridge because it is a small
+reversible tunnel executable sharing the TypeScript build. Split deployment
+packages only when production transport and hosting requirements stabilize.

@@ -1,4 +1,5 @@
 #include "app_config.h"
+#include "camera_capture.h"
 #include "microphone.h"
 #include "network.h"
 
@@ -16,9 +17,8 @@
 #define SCROLL_REPEAT_INTERVAL_FRAMES 4
 #define MIC_STREAM_BUFFER_CAPACITY 8192
 #define MIC_STREAM_SEND_THRESHOLD 1024
-#define STAGE1_SESSION_ID "ses_fake_local"
-#define STAGE1_AUDIO_CAPTURE_PATH \
-    "/v1/sessions/" STAGE1_SESSION_ID "/captures/audio"
+#define MAX_SESSION_CHOICES 6
+#define SESSION_LABEL_CAPACITY 72
 
 typedef enum {
     PUSH_COMMAND_NONE = 0,
@@ -39,6 +39,7 @@ static char pending_approval_id[65];
 static char pending_approval_summary[96];
 static char view_state[32] = "Ready";
 static char event_detail[96];
+static char camera_detail[160];
 static char wrapped_lines[RESPONSE_MAX_LINES][RESPONSE_WRAP_COLUMNS + 1];
 static u8 microphone_stream_buffer[MIC_STREAM_BUFFER_CAPACITY];
 static bool network_ready;
@@ -58,6 +59,16 @@ static unsigned int event_cursor;
 static bool turn_active;
 static PushCommandKind push_command_kind;
 static u64 push_command_started_ms;
+static char current_session_id[65];
+static char current_session_label[SESSION_LABEL_CAPACITY];
+static char audio_capture_path[128];
+static char session_ids[MAX_SESSION_CHOICES][65];
+static char session_labels[MAX_SESSION_CHOICES][SESSION_LABEL_CAPACITY];
+static size_t session_count;
+static char pending_transcript[THREEGENT_PROMPT_CAPACITY];
+static bool transcript_ready;
+static bool photo_pending;
+static char photo_capture_path[128];
 
 static void set_view_state(const char *state)
 {
@@ -122,7 +133,9 @@ static void draw_top(void)
     consoleClear();
 
     printf("3gent | %s\n", THREEGENT_APP_VERSION);
-    printf("Stage 1.5 | Pushed fake agent\n");
+    printf("Functional core | %s\n", current_session_label[0] != '\0'
+        ? current_session_label
+        : "Choose a session");
     printf("Agent: %s | event %u\n", agent_state, event_cursor);
     printf("State: %s\n", view_state);
     if (prompt[0] != '\0') {
@@ -166,15 +179,21 @@ static void draw_bottom(void)
     consoleSelect(&bottom_console);
     consoleClear();
 
-    printf("A: Type + send to agent\n");
+    if (transcript_ready) {
+        printf("A: Send transcript | Y: Edit\n");
+        printf("B: Cancel transcript\n");
+    } else {
+        printf("A: Type + send to agent\n");
+    }
     if (pending_approval_id[0] != '\0') {
         printf("X: Approve once | B: Decline\n");
     } else if (turn_active) {
         printf("B: Interrupt active turn\n");
     } else {
-        printf("X: Fake approval demo\n");
+        printf("X: Approval test prompt\n");
     }
     printf("R: Hold to stream mic (5 min max)\n");
+    printf("L: Take photo for next prompt\n");
     printf("UP/DOWN: Scroll response\n");
     printf("START: Exit\n\n");
     printf(
@@ -243,6 +262,12 @@ static void draw_bottom(void)
     }
     if (event_detail[0] != '\0') {
         printf("%s\n", event_detail);
+    }
+    if (camera_detail[0] != '\0') {
+        printf("%s\n", camera_detail);
+    }
+    if (photo_pending) {
+        printf("Photo: attached to next prompt\n");
     }
 }
 
@@ -374,6 +399,229 @@ static bool json_read_string(
     return true;
 }
 
+static void draw_session_picker(size_t selected, const char *status)
+{
+    consoleSelect(&top_console);
+    consoleClear();
+    printf("3gent | %s\n", THREEGENT_APP_VERSION);
+    printf("Choose a coding-agent task\n");
+    printf("------------------------------------------------\n");
+    if (session_count == 0) {
+        printf("No existing tasks were returned.\n");
+    } else {
+        for (size_t index = 0; index < session_count; index++) {
+            printf(
+                "%c %u. %.38s\n",
+                index == selected ? '>' : ' ',
+                (unsigned int)(index + 1),
+                session_labels[index]
+            );
+        }
+    }
+
+    consoleSelect(&bottom_console);
+    consoleClear();
+    printf("A: Resume selected task\n");
+    printf("X: Start new task in bridge workspace\n");
+    printf("UP/DOWN: Choose | START: Exit\n\n");
+    if (status != NULL && status[0] != '\0') {
+        printf("%s\n", status);
+    }
+}
+
+static bool wait_for_control_request(const char *status)
+{
+    while (aptMainLoop()) {
+        hidScanInput();
+        if ((hidKeysDown() & KEY_START) != 0) {
+            network_control_cancel();
+            return false;
+        }
+        network_pump();
+        NetworkOperationStatus operation = network_control_status();
+        draw_session_picker(0, status);
+        present_frame();
+        if (operation == NETWORK_OPERATION_SUCCEEDED) {
+            return true;
+        }
+        if (operation == NETWORK_OPERATION_FAILED) {
+            snprintf(
+                network_detail,
+                sizeof(network_detail),
+                "Session request failed: %.120s",
+                network_control_error()
+            );
+            network_control_consume();
+            return false;
+        }
+    }
+    network_control_cancel();
+    return false;
+}
+
+static bool load_session_choices(void)
+{
+    if (!network_control_begin_get(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_SERVER_PORT,
+            "/v1/sessions?limit=6",
+            network_detail,
+            sizeof(network_detail)
+        ) || !wait_for_control_request("Loading recent tasks...")) {
+        return false;
+    }
+    if (network_control_http_status() != 200) {
+        snprintf(
+            network_detail,
+            sizeof(network_detail),
+            "Session list returned HTTP %u",
+            network_control_http_status()
+        );
+        network_control_consume();
+        return false;
+    }
+
+    const char *body = network_control_response();
+    const char *cursor = strstr(body, "\"sessions\":[");
+    session_count = 0;
+    if (cursor != NULL) {
+        while (session_count < MAX_SESSION_CHOICES) {
+            cursor = strstr(cursor, "\"sessionId\":");
+            if (cursor == NULL) {
+                break;
+            }
+            if (!json_read_string(
+                    cursor,
+                    "sessionId",
+                    session_ids[session_count],
+                    sizeof(session_ids[session_count])
+                ) || !json_read_string(
+                    cursor,
+                    "label",
+                    session_labels[session_count],
+                    sizeof(session_labels[session_count])
+                )) {
+                break;
+            }
+            session_count++;
+            cursor += strlen("\"sessionId\":");
+        }
+    }
+    network_control_consume();
+    return true;
+}
+
+static bool start_new_session(void)
+{
+    const char body[] = "{}";
+    if (!network_control_begin_post(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_SERVER_PORT,
+            "/v1/sessions",
+            "application/json",
+            body,
+            sizeof(body) - 1,
+            network_detail,
+            sizeof(network_detail)
+        ) || !wait_for_control_request("Starting a new Codex task...")) {
+        return false;
+    }
+    if (network_control_http_status() != 201
+        && network_control_http_status() != 200) {
+        snprintf(
+            network_detail,
+            sizeof(network_detail),
+            "Start task returned HTTP %u",
+            network_control_http_status()
+        );
+        network_control_consume();
+        return false;
+    }
+    bool parsed = json_read_string(
+        network_control_response(),
+        "sessionId",
+        current_session_id,
+        sizeof(current_session_id)
+    );
+    network_control_consume();
+    if (!parsed) {
+        snprintf(network_detail, sizeof(network_detail), "Start task response was malformed");
+        return false;
+    }
+    snprintf(current_session_label, sizeof(current_session_label), "New Codex task");
+    return true;
+}
+
+static bool resume_session(size_t selected)
+{
+    if (selected >= session_count) {
+        return false;
+    }
+    char path[112];
+    snprintf(path, sizeof(path), "/v1/sessions/%s/resume", session_ids[selected]);
+    if (!network_control_begin_post(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_SERVER_PORT,
+            path,
+            "application/json",
+            NULL,
+            0,
+            network_detail,
+            sizeof(network_detail)
+        ) || !wait_for_control_request("Resuming selected task...")) {
+        return false;
+    }
+    if (network_control_http_status() != 202
+        && network_control_http_status() != 200) {
+        snprintf(
+            network_detail,
+            sizeof(network_detail),
+            "Resume task returned HTTP %u",
+            network_control_http_status()
+        );
+        network_control_consume();
+        return false;
+    }
+    network_control_consume();
+    snprintf(current_session_id, sizeof(current_session_id), "%s", session_ids[selected]);
+    snprintf(current_session_label, sizeof(current_session_label), "%s", session_labels[selected]);
+    return true;
+}
+
+static bool choose_session(void)
+{
+    if (!load_session_choices()) {
+        return false;
+    }
+    size_t selected = 0;
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 keys = hidKeysDown();
+        if ((keys & KEY_START) != 0) {
+            return false;
+        }
+        if ((keys & KEY_UP) != 0 && session_count > 0) {
+            selected = selected == 0 ? session_count - 1 : selected - 1;
+        }
+        if ((keys & KEY_DOWN) != 0 && session_count > 0) {
+            selected = (selected + 1) % session_count;
+        }
+        if ((keys & KEY_A) != 0 && session_count > 0) {
+            if (resume_session(selected)) {
+                return true;
+            }
+        }
+        if ((keys & KEY_X) != 0) {
+            if (start_new_session()) {
+                return true;
+            }
+        }
+        draw_session_picker(selected, network_detail);
+        present_frame();
+    }
+    return false;
+}
+
 static void handle_protocol_event(const char *event_json)
 {
     unsigned int protocol_version = 0;
@@ -453,11 +701,65 @@ static void handle_protocol_event(const char *event_json)
         pending_approval_id[0] = '\0';
         pending_approval_summary[0] = '\0';
     } else if (strcmp(type, "capture.accepted") == 0) {
-        set_view_state("Capture accepted");
+        char kind[24];
+        if (json_read_string(event_json, "kind", kind, sizeof(kind))
+            && strcmp(kind, "audio") == 0) {
+            pending_transcript[0] = '\0';
+            transcript_ready = false;
+            response[0] = '\0';
+            append_response("Transcribing audio on the bridge...\n");
+            set_view_state("Transcribing audio...");
+        } else {
+            set_view_state("Capture accepted");
+        }
+    } else if (strcmp(type, "capture.transcript.delta") == 0) {
+        char text[320];
+        if (json_read_string(event_json, "text", text, sizeof(text))) {
+            size_t used = strlen(pending_transcript);
+            size_t available = sizeof(pending_transcript) - used - 1;
+            strncat(pending_transcript, text, available);
+        }
+    } else if (strcmp(type, "capture.transcribed") == 0) {
+        transcript_ready = pending_transcript[0] != '\0';
+        if (transcript_ready) {
+            snprintf(prompt, sizeof(prompt), "%s", pending_transcript);
+            response[0] = '\0';
+            append_response("Transcript (review before sending):\n\n");
+            append_response(pending_transcript);
+            append_response("\n\nA: send | Y: edit | B: cancel\n");
+            set_view_state("Transcript ready - press A");
+        } else {
+            set_view_state("Transcript was empty");
+        }
+    } else if (strcmp(type, "capture.photo.ready") == 0) {
+        photo_pending = true;
+        set_view_state("Photo ready - type a prompt");
+    } else if (strcmp(type, "capture.attached") == 0) {
+        photo_pending = false;
+        append_response("\n[Photo attached to this turn]\n");
     } else if (strcmp(type, "turn.interrupted") == 0) {
         append_response("\n[Turn interrupted]\n");
         turn_active = false;
         set_view_state("Turn interrupted");
+    } else if (strcmp(type, "turn.diff.updated") == 0) {
+        unsigned int files = 0;
+        unsigned int additions = 0;
+        unsigned int deletions = 0;
+        if (json_read_unsigned(event_json, "files", &files)
+            && json_read_unsigned(event_json, "additions", &additions)
+            && json_read_unsigned(event_json, "deletions", &deletions)) {
+            char summary[96];
+            snprintf(
+                summary,
+                sizeof(summary),
+                "\n[Diff: %u file%s, +%u/-%u]\n",
+                files,
+                files == 1 ? "" : "s",
+                additions,
+                deletions
+            );
+            append_response(summary);
+        }
     } else if (strcmp(type, "turn.completed") == 0) {
         char outcome[24];
         turn_active = false;
@@ -636,7 +938,7 @@ static SwkbdButton read_prompt(SwkbdResult *keyboard_result)
         (int)sizeof(prompt) - 1
     );
     swkbdSetInitialText(&keyboard, prompt);
-    swkbdSetHintText(&keyboard, "Send a prompt to the local fake agent");
+    swkbdSetHintText(&keyboard, "Send a prompt to the selected coding agent");
     swkbdSetButton(&keyboard, SWKBD_BUTTON_LEFT, "Cancel", false);
     swkbdSetButton(&keyboard, SWKBD_BUTTON_RIGHT, "Send", true);
     swkbdSetValidation(&keyboard, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
@@ -655,7 +957,7 @@ static bool restart_push_link(void)
     if (!network_push_start(
             THREEGENT_SERVER_HOST,
             THREEGENT_PUSH_PORT,
-            STAGE1_SESSION_ID,
+            current_session_id,
             event_cursor,
             network_detail,
             sizeof(network_detail)
@@ -668,13 +970,17 @@ static bool restart_push_link(void)
 
 static void submit_text_capture(const char *text)
 {
+    transcript_ready = false;
+    pending_transcript[0] = '\0';
     response[0] = '\0';
     response_scroll_lines = 0;
     if (network_ready) {
         network_detail[0] = '\0';
     }
 
-    snprintf(prompt, sizeof(prompt), "%s", text);
+    if (text != prompt) {
+        snprintf(prompt, sizeof(prompt), "%s", text);
+    }
     set_view_state("Submitting capture...");
     redraw();
     present_frame();
@@ -891,7 +1197,7 @@ static void begin_microphone_capture(void)
     if (!network_audio_stream_begin(
             THREEGENT_SERVER_HOST,
             THREEGENT_SERVER_PORT,
-            STAGE1_AUDIO_CAPTURE_PATH,
+            audio_capture_path,
             network_detail,
             sizeof(network_detail)
         )) {
@@ -966,12 +1272,13 @@ static void update_microphone_capture(void)
             (unsigned int)(osGetTime() - microphone_finish_started_ms),
             microphone_link_latency_ms
         );
-        response[0] = '\0';
-        set_view_state(
-            microphone_maximum_reached
-                ? "5-minute audio accepted"
-                : "Audio accepted"
-        );
+        if (!transcript_ready) {
+            set_view_state(
+                microphone_maximum_reached
+                    ? "5-minute audio transcribing"
+                    : "Audio transcribing"
+            );
+        }
         microphone_maximum_reached = false;
         redraw();
         return;
@@ -1037,6 +1344,134 @@ static void update_microphone_capture(void)
             return;
         }
         microphone_network_finish_requested = true;
+    }
+    redraw();
+}
+
+static void capture_and_upload_photo(void)
+{
+    camera_detail[0] = '\0';
+    u8 *photo = malloc(THREEGENT_PHOTO_BYTES);
+    if (photo == NULL) {
+        snprintf(camera_detail, sizeof(camera_detail), "Could not allocate photo buffer");
+        set_view_state("Camera error");
+        redraw();
+        return;
+    }
+    if (!camera_capture_initialize(camera_detail, sizeof(camera_detail))
+        || !camera_capture_photo(
+            photo,
+            THREEGENT_PHOTO_BYTES,
+            camera_detail,
+            sizeof(camera_detail)
+        )) {
+        set_view_state("Camera capture error");
+        free(photo);
+        redraw();
+        return;
+    }
+
+    bool accepted = false;
+    while (aptMainLoop()) {
+        hidScanInput();
+        u32 keys = hidKeysDown();
+        network_pump();
+        update_push_link();
+        camera_capture_draw_preview(photo);
+        consoleSelect(&bottom_console);
+        consoleClear();
+        printf("Photo preview\n\nA: Attach to next prompt\nB: Cancel\n");
+        present_frame();
+        if ((keys & KEY_A) != 0) {
+            accepted = true;
+            break;
+        }
+        if ((keys & (KEY_B | KEY_START)) != 0) {
+            break;
+        }
+    }
+    if (!accepted) {
+        free(photo);
+        set_view_state("Photo cancelled");
+        redraw();
+        return;
+    }
+
+    if (!network_photo_upload_begin(
+            THREEGENT_SERVER_HOST,
+            THREEGENT_SERVER_PORT,
+            photo_capture_path,
+            camera_detail,
+            sizeof(camera_detail)
+        )) {
+        free(photo);
+        set_view_state("Photo upload error");
+        redraw();
+        return;
+    }
+    size_t offset = 0;
+    bool finish_requested = false;
+    bool complete = false;
+    while (aptMainLoop()) {
+        hidScanInput();
+        if ((hidKeysDown() & KEY_START) != 0) {
+            network_photo_upload_abort();
+            break;
+        }
+        network_pump();
+        update_push_link();
+        NetworkOperationStatus status = network_photo_upload_status();
+        if (status == NETWORK_OPERATION_FAILED) {
+            snprintf(camera_detail, sizeof(camera_detail), "%s", network_photo_upload_error());
+            network_photo_upload_consume();
+            break;
+        }
+        if (status == NETWORK_OPERATION_SUCCEEDED) {
+            network_photo_upload_consume();
+            complete = true;
+            break;
+        }
+        if (offset < THREEGENT_PHOTO_BYTES && network_photo_upload_can_write()) {
+            size_t remaining = THREEGENT_PHOTO_BYTES - offset;
+            size_t chunk = remaining > MIC_STREAM_BUFFER_CAPACITY
+                ? MIC_STREAM_BUFFER_CAPACITY
+                : remaining;
+            if (!network_photo_upload_write(
+                    photo + offset,
+                    chunk,
+                    camera_detail,
+                    sizeof(camera_detail)
+                )) {
+                network_photo_upload_abort();
+                break;
+            }
+            offset += chunk;
+        } else if (offset == THREEGENT_PHOTO_BYTES && !finish_requested) {
+            if (!network_photo_upload_finish(camera_detail, sizeof(camera_detail))) {
+                network_photo_upload_abort();
+                break;
+            }
+            finish_requested = true;
+        }
+        snprintf(
+            response,
+            sizeof(response),
+            "Uploading photo: %u / %u bytes",
+            (unsigned int)offset,
+            (unsigned int)THREEGENT_PHOTO_BYTES
+        );
+        set_view_state("Uploading photo...");
+        redraw();
+        present_frame();
+    }
+    free(photo);
+    if (complete) {
+        photo_pending = true;
+        snprintf(camera_detail, sizeof(camera_detail), "Uploaded 400x240 RGB565 photo");
+        snprintf(response, sizeof(response), "Photo ready. Type or speak the prompt that should include it.");
+        set_view_state("Photo attached to next prompt");
+    } else {
+        set_view_state("Photo upload failed");
     }
     redraw();
 }
@@ -1125,6 +1560,25 @@ int main(int argc, char **argv)
         } else {
             set_view_state("Server offline - retry action");
         }
+        if (!choose_session()) {
+            microphone_shutdown();
+            network_stop();
+            gfxExit();
+            return 0;
+        }
+        snprintf(
+            audio_capture_path,
+            sizeof(audio_capture_path),
+            "/v1/sessions/%s/captures/audio",
+            current_session_id
+        );
+        snprintf(
+            photo_capture_path,
+            sizeof(photo_capture_path),
+            "/v1/sessions/%s/captures/photo",
+            current_session_id
+        );
+        event_cursor = 0;
         restart_push_link();
     }
     redraw();
@@ -1143,7 +1597,11 @@ int main(int argc, char **argv)
         }
 
         if ((keys_down & KEY_R) != 0 && !recording_session_active) {
-            if (turn_active) {
+            if (transcript_ready) {
+                snprintf(network_detail, sizeof(network_detail), "Send or cancel the reviewed transcript first");
+                set_view_state("Transcript awaiting decision");
+                redraw();
+            } else if (turn_active) {
                 snprintf(
                     network_detail,
                     sizeof(network_detail),
@@ -1153,6 +1611,16 @@ int main(int argc, char **argv)
                 redraw();
             } else {
                 begin_microphone_capture();
+            }
+        }
+
+        if ((keys_down & KEY_L) != 0 && !recording_session_active) {
+            if (turn_active || transcript_ready || push_command_kind != PUSH_COMMAND_NONE) {
+                snprintf(network_detail, sizeof(network_detail), "Wait for the current action before taking a photo");
+                set_view_state("Camera is busy");
+                redraw();
+            } else {
+                capture_and_upload_photo();
             }
         }
 
@@ -1167,7 +1635,10 @@ int main(int argc, char **argv)
         }
 
         if ((keys_down & KEY_A) != 0) {
-            if (turn_active || push_command_kind != PUSH_COMMAND_NONE) {
+            if (transcript_ready) {
+                snprintf(prompt, sizeof(prompt), "%s", pending_transcript);
+                submit_text_capture(prompt);
+            } else if (turn_active || push_command_kind != PUSH_COMMAND_NONE) {
                 snprintf(
                     network_detail,
                     sizeof(network_detail),
@@ -1200,6 +1671,25 @@ int main(int argc, char **argv)
             }
         }
 
+        if ((keys_down & KEY_Y) != 0 && transcript_ready) {
+            network_push_stop();
+            snprintf(prompt, sizeof(prompt), "%s", pending_transcript);
+            SwkbdResult keyboard_result = SWKBD_NONE;
+            SwkbdButton button = read_prompt(&keyboard_result);
+            restart_push_link();
+            if (button == SWKBD_BUTTON_RIGHT) {
+                snprintf(pending_transcript, sizeof(pending_transcript), "%s", prompt);
+                response[0] = '\0';
+                append_response("Edited transcript (review before sending):\n\n");
+                append_response(pending_transcript);
+                append_response("\n\nA: send | Y: edit | B: cancel\n");
+                set_view_state("Transcript edited - press A");
+            } else {
+                set_view_state("Transcript edit cancelled");
+            }
+            redraw();
+        }
+
         if ((keys_down & KEY_X) != 0) {
             if (pending_approval_id[0] != '\0') {
                 respond_to_approval("approve_once");
@@ -1209,7 +1699,15 @@ int main(int argc, char **argv)
         }
 
         if ((keys_down & KEY_B) != 0) {
-            if (pending_approval_id[0] != '\0') {
+            if (transcript_ready) {
+                transcript_ready = false;
+                pending_transcript[0] = '\0';
+                prompt[0] = '\0';
+                response[0] = '\0';
+                append_response("[Transcript cancelled]\n");
+                set_view_state("Ready");
+                redraw();
+            } else if (pending_approval_id[0] != '\0') {
                 respond_to_approval("decline");
             } else {
                 interrupt_active_turn();
@@ -1221,6 +1719,7 @@ int main(int argc, char **argv)
         present_frame();
     }
 
+    camera_capture_shutdown();
     microphone_shutdown();
     network_stop();
     gfxExit();

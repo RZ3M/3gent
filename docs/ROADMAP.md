@@ -2,6 +2,9 @@
 
 This roadmap is ordered by **risk reduction**, not excitement.
 
+The consolidated physical acceptance procedure for the current functional core
+is `docs/HARDWARE_TEST_CHECKLIST.md`.
+
 ## Stage 0 — Prove the 3DS boundaries
 
 **Status:** Core feasibility complete on hardware; failure-path hardening remains.
@@ -139,6 +142,8 @@ remote transport direction.
 
 ## Stage 2 — Codex adapter
 
+**Status:** Host implementation complete; physical 3DS checklist pending.
+
 Use Codex app-server on the desktop side.
 
 Deliver:
@@ -154,11 +159,19 @@ Deliver:
 This is an observation-and-control loop, not send-only integration: Codex turn
 events and assistant output must remain visible on the 3DS throughout the turn.
 
+Implemented in `0.2.0-stage2`: supported stdio app-server startup, installed
+schema inspection, bounded JSON-RPC, recent task discovery, new/resumed tasks,
+opaque session IDs, prompt/interrupt, streamed response and state translation,
+compact diff counts, one-shot command/file approvals, unsupported permission
+grant rejection, and a handheld task chooser.
+
 Codex-specific wire objects must stop at the adapter boundary.
 
 ---
 
 ## Stage 3 — Voice-first local loop
+
+**Status:** Host implementation complete; physical transcript-review checklist pending.
 
 Deliver:
 - reliable push-to-talk through the bridge;
@@ -173,9 +186,20 @@ separate explicit send action; allow cancel/edit where practical.
 
 Complete the useful local voice→agent loop before adding remote transport risk.
 
+Implemented in `0.3.0-stage3`: bounded WAV transcription through either a local
+command backend or the OpenAI audio transcription API, transcript delta events,
+a 1,600-byte review bound, explicit handheld send/edit/cancel controls, and a
+120-second non-blocking finalization deadline. Audio never starts an agent turn
+until the user sends the reviewed transcript.
+
 ---
 
 ## Stage 4 — QR pairing
+
+**Status:** Deferred from the current hardware-test goal by explicit user choice.
+
+The current build is not a public release. QR pairing, expiring bootstrap data,
+device credentials and revocation return with production security work.
 
 Deliver:
 - bridge-generated QR;
@@ -193,6 +217,9 @@ Security review required.
 
 **Initial distribution:** self-hosted.
 
+**Status:** Plaintext self-hosted hardware-test path implemented; production
+authentication/TLS and physical remote-network tests pending.
+
 Deliver:
 - authenticated bridge↔relay;
 - authenticated 3DS↔relay;
@@ -204,15 +231,28 @@ Deliver:
 
 Do not ship a public relay until threat model and abuse controls are written.
 
+The current reversible test implementation uses four relay ports: public HTTP
+media/session traffic, public pushed control, authenticated outbound bridge HTTP
+uplinks, and an authenticated outbound bridge push uplink. A bounded pool lets
+the laptop remain behind NAT. It refuses to start without `--unsafe-public` and
+is not accepted as the production transport.
+
 ---
 
 ## Stage 6 — Camera capture
+
+**Status:** Host/client implementation complete; physical 3DS camera test pending.
 
 Deliver:
 - photo;
 - preview;
 - upload;
 - attach to prompt.
+
+Implemented: outer camera RGB565 capture at 400×240, on-device preview,
+cancel/accept, bounded chunked upload, bridge-side BMP construction, one pending
+photo per session, consume-on-next-prompt semantics, and Codex `localImage`
+translation.
 
 ---
 

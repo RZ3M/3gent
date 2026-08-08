@@ -21,7 +21,8 @@ client memory. Two warm HTTP connections removed the measured one-to-two-second
 fresh-connection delay; the user confirmed the revised text and audio paths feel
 responsive.
 
-Stage 1 now turns those isolated proofs into a local fake-agent vertical slice:
+Stage 1 turned those isolated proofs into a local fake-agent vertical slice;
+Stage 2 now connects that same boundary to the installed Codex app-server:
 
 ```text
 captures + commands: 3DS → TypeScript bridge → agent
@@ -30,9 +31,14 @@ state + responses:  3DS ← TypeScript bridge ← agent
 
 It exercises session state, streamed text deltas, interruption, approval
 requests and responses, command deduplication, and cursor-based event replay
-before a real coding-agent adapter is introduced. 3gent is a bidirectional
+before and during real coding-agent integration. 3gent is a bidirectional
 agent companion: sending input without showing what the agent is doing is not a
 complete product loop.
+
+In the current small-screen functional core, that monitoring loop is the live
+working/waiting/idle state, streamed response text, diff counts, approvals,
+errors, and completion. Raw terminal output and detailed per-tool timelines stay
+on the laptop for now.
 
 ## Implementation status
 
@@ -57,19 +63,25 @@ fixed the observed 40 ms microphone stall on hardware. Version `0.0.8-stage0`
 warms and reuses separate low-latency command and audio connections so user
 actions no longer pay a fresh TCP handshake; its focused hardware retest passed.
 
-The new `bridge/` service is a TypeScript/Node implementation of the Stage 1
-agent boundary with a deterministic fake adapter. Its automated tests cover the
+The `bridge/` service is a TypeScript/Node implementation of the agent boundary
+with selectable fake and Codex app-server adapters. Its automated tests cover the
 protocol version, sessions, ordered/replayed events, duplicate commands,
 approvals, interruption, and streamed audio/WAV output. The
-`0.1.2-stage1.5` 3DS client now uses a persistent pushed control link: commands
+`0.6.0-hwtest` 3DS client uses a persistent pushed control link: commands
 go to the bridge and agent events return immediately without HTTP polling. It
 adds heartbeat, jittered reconnect, cursor replay, visible resync, and safe
-retry of one unacknowledged command. The bridge has 23 passing automated tests
-and the handheld build succeeds; this new pushed path still needs its focused
-physical hardware check.
+retry of one unacknowledged command. The bridge has 44 passing automated tests
+and the handheld build succeeds. It can list recent Codex tasks, resume one or
+start a new task in the bridge workspace, stream real responses and diff
+summaries, interrupt turns, and answer one-shot command/file approvals. The
+Stage 3 additionally transcribes streamed microphone WAVs on the laptop and
+requires handheld review/send, edit, or cancel before an agent turn. The
+complete path still needs its focused physical hardware check.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
-physical Stage 1 checklist. See [`bridge/README.md`](bridge/README.md) for the
+device notes. The exhaustive functional-core physical procedure is
+[`docs/HARDWARE_TEST_CHECKLIST.md`](docs/HARDWARE_TEST_CHECKLIST.md). See
+[`bridge/README.md`](bridge/README.md) for the
 current local bridge. The Python server under `tools/dev-server/` remains as the
 reproducible Stage 0 fixture.
 
@@ -128,14 +140,18 @@ Codex supports repository-level `AGENTS.md` instructions, so this repo uses `AGE
 
 ## Current phase
 
-**Stage 1.5: pushed local fake-agent transport.**
+**Functional-core hardware-test build (Stages 2, 3, 5 and 6).**
 
-The Stage 1 fake-agent loop has a qualitative physical pass. Local pushed
-bidirectional control is now implemented and host-tested with no event polling;
-its physical reconnect, heartbeat, audio concurrency, sleep/resume, and
-no-freeze checklist is next. The installed Codex app-server schema has been
-inspected in preparation for the first real adapter. Secure-transport
-feasibility still precedes the self-hosted remote relay.
+The fake-agent and local pushed-control loops remain available as deterministic
+fixtures. The bridge now launches the supported local stdio Codex app-server,
+discovers opaque task sessions, starts/resumes tasks, translates streamed text,
+state, diffs, errors and approvals, and keeps Codex wire objects off the 3DS.
+Voice transcription supports a local command or OpenAI-compatible backend with
+explicit transcript review. A self-hosted reverse relay now carries both
+directions plus media for remote testing, and 400×240 camera photos can be
+previewed, uploaded and attached to the next Codex prompt. QR pairing, device
+credentials and production TLS are intentionally outside this user-requested
+no-security hardware-test build.
 
 ## License status
 

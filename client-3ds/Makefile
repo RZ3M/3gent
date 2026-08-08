@@ -13,7 +13,7 @@ SOURCES     := source
 INCLUDES    := include
 
 APP_TITLE       := 3gent
-APP_DESCRIPTION := Stage 1.5 pushed bridge build
+APP_DESCRIPTION := Functional core hardware-test build
 APP_AUTHOR      := 3gent contributors
 
 SERVER_HOST ?= 192.168.1.2

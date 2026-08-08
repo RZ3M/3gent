@@ -106,12 +106,18 @@ Every production connection mode must support both directions:
 If the user must return to the laptop to understand what the agent is doing, the
 core product loop is incomplete.
 
+For the functional-core release, visible progress means normalized working/
+waiting/idle state, streamed assistant responses, bounded diff summaries,
+approval requests, errors, and completion. Detailed per-tool timelines and raw
+command output are not required for this small-screen release and remain a later
+UI decision; they must not replace the streamed response itself.
+
 ## 4. Core use cases
 
 ### UC-01 — Voice prompt
 
-Target flow (implemented in Stage 3; the current fake adapter still uses a mock
-transcript without review):
+Target flow (implemented in the current hardware-test build; the fake adapter
+uses a deterministic mock transcription backend but the same review controls):
 
 1. User opens a connected agent session.
 2. User holds push-to-talk.
@@ -174,6 +180,7 @@ omits the sketch canvas.
 - Upload audio.
 - Off-device transcription.
 - Typed prompt through native software keyboard.
+- Camera photo capture and next-prompt attachment.
 - Stream/display agent output.
 - Show agent state.
 - Handle basic approvals.
@@ -185,7 +192,6 @@ omits the sketch canvas.
 ### Explicitly deferred
 
 - full terminal emulation;
-- camera prompt capture;
 - drawing canvas;
 - handwriting recognition;
 - rich diff editor;

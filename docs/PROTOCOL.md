@@ -199,11 +199,14 @@ visibly reports that skipped history cannot be reconstructed.
 
 ```text
 GET  /health
-GET  /v1/sessions
+GET  /v1/sessions?limit=...&cursor=...
+POST /v1/sessions
 GET  /v1/sessions/:sessionId
+POST /v1/sessions/:sessionId/resume
 GET  /v1/events?sessionId=...&after=...&limit=...
 POST /v1/sessions/:sessionId/captures/text
 POST /v1/sessions/:sessionId/captures/audio
+POST /v1/sessions/:sessionId/captures/photo
 POST /v1/sessions/:sessionId/turns/current/interrupt
 POST /v1/sessions/:sessionId/approvals/:approvalId/respond
 ```
@@ -245,7 +248,12 @@ approval.requested
 approval.resolved
 capture.accepted
 capture.progress
+capture.transcript.delta
+capture.transcribed
+capture.photo.ready
+capture.attached
 turn.interrupted
+turn.diff.updated
 turn.completed
 error
 ```
@@ -256,8 +264,20 @@ Normalized session states are:
 offline | idle | working | waiting_for_user | completed | failed
 ```
 
-The fake adapter uses `idle`, `working`, and `waiting_for_user`. Later adapters
-may use every state without changing the 3DS protocol.
+The Codex adapter maps app-server threads and turns into these same objects.
+Codex UUIDs never cross the bridge boundary: deterministic opaque `ses_codex_`
+identifiers are used instead. `turn.diff.updated` carries only bounded counts
+for files, additions and deletions; raw diffs remain on the trusted laptop.
+
+Photo bodies contain exactly 192,000 bytes of 400×240 RGB565 with content type
+`application/x-3gent-rgb565; width=400; height=240`. The bridge writes a BMP and
+retains one photo for the session's next successful prompt. `capture.photo.ready`
+marks it pending; `capture.attached` marks it consumed.
+
+The hardware-test self-hosted relay does not change application frames. It pairs
+one public byte stream with one authenticated outbound bridge tunnel, so cursor,
+heartbeat, command-ID and media semantics remain identical. This plaintext
+feasibility transport is not protocol-v1 production security.
 
 ## 8. Approvals
 

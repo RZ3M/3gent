@@ -30,7 +30,12 @@ export type EventType =
   | "approval.resolved"
   | "capture.accepted"
   | "capture.progress"
+  | "capture.photo.ready"
+  | "capture.attached"
+  | "capture.transcript.delta"
+  | "capture.transcribed"
   | "turn.interrupted"
+  | "turn.diff.updated"
   | "turn.completed"
   | "error";
 

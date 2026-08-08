@@ -797,6 +797,11 @@ static u64 new_network_deadline(void)
     return osGetTime() + (u64)THREEGENT_NETWORK_TIMEOUT_SECONDS * 1000U;
 }
 
+static u64 new_transcription_deadline(void)
+{
+    return osGetTime() + (u64)THREEGENT_TRANSCRIPTION_TIMEOUT_SECONDS * 1000U;
+}
+
 static int socket_ready_now(
     int socket_fd,
     bool wait_for_write,
@@ -1965,10 +1970,11 @@ static void fail_audio(const char *fallback_message)
     audio_transaction.deadline_ms = 0;
 }
 
-bool network_audio_stream_begin(
+static bool begin_media_stream(
     const char *host,
     unsigned short port,
     const char *path,
+    const char *content_type,
     char *error,
     size_t error_capacity
 )
@@ -1978,12 +1984,13 @@ bool network_audio_stream_begin(
         return false;
     }
     if (audio_transaction.phase != AUDIO_PHASE_IDLE) {
-        set_error(error, error_capacity, "audio stream is already active");
+        set_error(error, error_capacity, "media stream is already active");
         return false;
     }
     if (host == NULL || strlen(host) >= sizeof(audio_transaction.host)
-        || path == NULL || path[0] != '/') {
-        set_error(error, error_capacity, "invalid audio stream request");
+        || path == NULL || path[0] != '/'
+        || content_type == NULL || strlen(content_type) > 160) {
+        set_error(error, error_capacity, "invalid media stream request");
         return false;
     }
 
@@ -2002,8 +2009,7 @@ bool network_audio_stream_begin(
         "User-Agent: 3gent/%s\r\n"
         "X-3gent-Protocol-Version: %u\r\n"
         "X-3gent-Command-Id: %s\r\n"
-        "Content-Type: application/x-3gent-pcm; "
-            "format=s16le; rate=16364; channels=1\r\n"
+        "Content-Type: %s\r\n"
         "Transfer-Encoding: chunked\r\n"
         "Connection: keep-alive\r\n"
         "\r\n",
@@ -2012,7 +2018,8 @@ bool network_audio_stream_begin(
         (unsigned int)port,
         THREEGENT_APP_VERSION,
         THREEGENT_PROTOCOL_VERSION,
-        command_id
+        command_id,
+        content_type
     );
     if (request_size < 0
         || (size_t)request_size >= sizeof(audio_transaction.request_header)) {
@@ -2046,6 +2053,42 @@ bool network_audio_stream_begin(
         ? AUDIO_PHASE_SENDING_HEADER
         : AUDIO_PHASE_CONNECTING;
     return true;
+}
+
+bool network_audio_stream_begin(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *error,
+    size_t error_capacity
+)
+{
+    return begin_media_stream(
+        host,
+        port,
+        path,
+        "application/x-3gent-pcm; format=s16le; rate=16364; channels=1",
+        error,
+        error_capacity
+    );
+}
+
+bool network_photo_upload_begin(
+    const char *host,
+    unsigned short port,
+    const char *path,
+    char *error,
+    size_t error_capacity
+)
+{
+    return begin_media_stream(
+        host,
+        port,
+        path,
+        "application/x-3gent-rgb565; width=400; height=240",
+        error,
+        error_capacity
+    );
 }
 
 bool network_audio_stream_can_write(void)
@@ -2230,6 +2273,7 @@ static void pump_audio(void)
                 audio_transaction.output_offset = 0;
                 reset_async_response(&audio_transaction.response);
                 audio_transaction.phase = AUDIO_PHASE_RECEIVING;
+                audio_transaction.deadline_ms = new_transcription_deadline();
                 continue;
             }
             return;
@@ -2248,7 +2292,7 @@ static void pump_audio(void)
         if (step == ASYNC_STEP_PENDING) {
             return;
         }
-        audio_transaction.deadline_ms = new_network_deadline();
+        audio_transaction.deadline_ms = new_transcription_deadline();
         if (step != ASYNC_STEP_COMPLETE) {
             return;
         }
@@ -2312,6 +2356,46 @@ void network_audio_stream_abort(void)
 {
     close_socket(&audio_stream_socket);
     memset(&audio_transaction, 0, sizeof(audio_transaction));
+}
+
+bool network_photo_upload_can_write(void)
+{
+    return network_audio_stream_can_write();
+}
+
+bool network_photo_upload_write(
+    const void *data,
+    size_t size,
+    char *error,
+    size_t error_capacity
+)
+{
+    return network_audio_stream_write(data, size, error, error_capacity);
+}
+
+bool network_photo_upload_finish(char *error, size_t error_capacity)
+{
+    return network_audio_stream_finish(error, error_capacity);
+}
+
+NetworkOperationStatus network_photo_upload_status(void)
+{
+    return network_audio_stream_status();
+}
+
+const char *network_photo_upload_error(void)
+{
+    return network_audio_stream_error();
+}
+
+void network_photo_upload_consume(void)
+{
+    network_audio_stream_consume();
+}
+
+void network_photo_upload_abort(void)
+{
+    network_audio_stream_abort();
 }
 
 void network_pump(void)

@@ -1,6 +1,6 @@
 {
   "name": "@3gent/bridge",
-  "version": "0.1.2-stage1.5",
+  "version": "0.6.0-hwtest",
   "private": true,
   "type": "module",
   "engines": {
@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/index.js",
+    "relay": "node dist/src/relay-cli.js",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "devDependencies": {

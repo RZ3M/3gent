@@ -135,6 +135,15 @@ model is tested:
 This is not the final product mapping. In particular, approval ergonomics and a
 dedicated stop action still require hardware usability testing.
 
+### Functional-core hardware-test additions
+
+- startup Up/Down + `A`: choose and resume one of six recent tasks;
+- startup `X`: start a task in the bridge-configured workspace;
+- after transcription, `A`: send, `Y`: edit, `B`: cancel;
+- `L`: capture an outer-camera photo, preview it, then `A` accepts or `B`
+  cancels; the accepted photo is consumed by the next prompt;
+- runtime approval/interrupt and scrolling remain as above.
+
 ## 8. Camera and QR
 
 Pairing:
@@ -144,7 +153,7 @@ Pairing:
 - QR scan gives immediate success/failure;
 - manual fallback remains available.
 
-Future photo capture:
+Implemented hardware-test photo capture:
 - shoot;
 - preview;
 - optional prompt;
