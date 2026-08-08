@@ -806,6 +806,34 @@ capture remains deliberately excluded.
 
 ---
 
+## R-019 — Functional-core startup discovery on hardware
+
+**Question:** Does a failed initial session lookup remain observable and
+recoverable instead of looking like an application crash?
+
+**Status:** ROOT CAUSE CONFIRMED / FIX BUILDS / PHYSICAL RETEST PENDING
+
+**2026-08-08 hardware report and diagnosis:**
+
+- The first `0.6.0-hwtest` launch returned directly to Homebrew Launcher before
+  showing the task picker. The verbose bridge received no request and Luma had
+  no ARM11 dump, proving this was a controlled exit rather than an exception.
+- The installed 3DSX was inspected over FTP and contained `192.0.2.1`, the
+  intentionally unreachable documentation address used by the clean host build.
+  The laptop's active LAN address was `10.0.0.196`.
+- Session discovery timed out against the wrong address. `choose_session()` then
+  returned false and main shut down normally, which was indistinguishable from
+  a crash to the user.
+- Version `0.6.1-hwtest` keeps the task-discovery error on screen and accepts
+  `A` or `X` to retry; only `START` exits. The client is rebuilt with the active
+  numeric laptop address for the focused retest.
+
+**Conclusion:** compile-time endpoint mistakes must be visible and retryable.
+The physical retest must confirm task discovery and pushed connection using the
+correct embedded address.
+
+---
+
 ## Experiment template
 
 When closing a research item, add:

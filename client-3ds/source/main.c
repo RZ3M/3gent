@@ -590,8 +590,27 @@ static bool resume_session(size_t selected)
 
 static bool choose_session(void)
 {
-    if (!load_session_choices()) {
-        return false;
+    while (!load_session_choices()) {
+        session_count = 0;
+        bool retry = false;
+        while (aptMainLoop()) {
+            hidScanInput();
+            u32 keys = hidKeysDown();
+            if ((keys & KEY_START) != 0) {
+                return false;
+            }
+            if ((keys & (KEY_A | KEY_X)) != 0) {
+                retry = true;
+                break;
+            }
+            draw_session_picker(0, network_detail);
+            consoleSelect(&bottom_console);
+            printf("\nA/X: Retry task discovery\n");
+            present_frame();
+        }
+        if (!retry) {
+            return false;
+        }
     }
     size_t selected = 0;
     while (aptMainLoop()) {

@@ -102,7 +102,7 @@ Run this before the longer Stage 1.5 reliability list below:
 
 1. Start the bridge with `--adapter codex --workspace` pointing at a disposable
    test repository; confirm the bridge reports `Adapter: Codex app-server`.
-2. Launch `0.6.0-hwtest`; confirm no fake session ID is required and up to six
+2. Launch `0.6.1-hwtest`; confirm no fake session ID is required and up to six
    recent Codex tasks appear.
 3. Move the selection with tapped Up/Down, resume a task with `A`, and confirm
    the pushed link becomes ready.
