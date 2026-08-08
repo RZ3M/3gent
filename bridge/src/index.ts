@@ -7,6 +7,7 @@ interface Options {
   port: number;
   capturePath: string;
   verbose: boolean;
+  verbosePolls: boolean;
 }
 
 function parseArguments(arguments_: string[]): Options {
@@ -15,12 +16,16 @@ function parseArguments(arguments_: string[]): Options {
     port: 8080,
     capturePath: resolve("data", "latest.wav"),
     verbose: false,
+    verbosePolls: false,
   };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
     const value = arguments_[index + 1];
     if (argument === "--verbose") {
       options.verbose = true;
+    } else if (argument === "--verbose-polls") {
+      options.verbose = true;
+      options.verbosePolls = true;
     } else if (argument === "--host" && value !== undefined) {
       options.host = value;
       index += 1;
@@ -44,6 +49,7 @@ const options = parseArguments(process.argv.slice(2));
 const {application, server} = createBridgeServer({
   capturePath: options.capturePath,
   verbose: options.verbose,
+  verbosePolls: options.verbosePolls,
 });
 
 server.listen(options.port, options.host, () => {
@@ -51,7 +57,9 @@ server.listen(options.port, options.host, () => {
     `3gent Stage 1 bridge listening on http://${options.host}:${options.port}\n`
     + "Adapter: deterministic fake agent\n"
     + `Audio capture: ${options.capturePath}\n`
-    + `Logging: ${options.verbose ? "VERBOSE (full text and protocol payloads)" : "summary"}\n`
+    + `Logging: ${options.verbose
+      ? `VERBOSE (${options.verbosePolls ? "including empty polls" : "empty polls hidden"})`
+      : "summary"}\n`
     + (options.verbose
       ? "WARNING: verbose logs may contain sensitive prompt and agent content.\n"
       : "")

@@ -54,8 +54,11 @@ npm start -- --host 0.0.0.0 --port 8080
 ```
 
 For full request, prompt, acknowledgement, event, and audio-chunk diagnostics,
-append `--verbose`. This prints sensitive prompt and agent content and should be
-used only for deliberate local debugging.
+append `--verbose`. Empty event checks are hidden so the terminal shows only
+meaningful traffic. Use `--verbose-polls` only when diagnosing the polling loop;
+it implies verbose mode and restores every empty request/response line. Both
+modes can print sensitive prompt and agent content and should be used only for
+deliberate local debugging.
 
 Binding to `0.0.0.0` exposes an unauthenticated development service to the local
 network. Use a trusted LAN and disposable prompts. Do not expose it to the

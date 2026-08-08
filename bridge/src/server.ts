@@ -32,6 +32,7 @@ interface BridgeServerOptions {
   fakeDeltaIntervalMs?: number;
   logger?: (message: string) => void;
   verbose?: boolean;
+  verbosePolls?: boolean;
 }
 
 export class BridgeApplication {
@@ -41,12 +42,14 @@ export class BridgeApplication {
   readonly #capturePath: string;
   readonly #logger: (message: string) => void;
   readonly #verbose: boolean;
+  readonly #verbosePolls: boolean;
   #audioCaptureActive = false;
 
   public constructor(options: BridgeServerOptions = {}) {
     this.#capturePath = options.capturePath ?? DEFAULT_CAPTURE_PATH;
     this.#logger = options.logger ?? console.log;
-    this.#verbose = options.verbose ?? false;
+    this.#verbosePolls = options.verbosePolls ?? false;
+    this.#verbose = (options.verbose ?? false) || this.#verbosePolls;
     this.fakeAgent = new FakeAgent(
       this.events,
       options.fakeDeltaIntervalMs ?? 80,
@@ -59,7 +62,11 @@ export class BridgeApplication {
   ): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://bridge.local");
-      this.#logRequest(request, url);
+      const isEventPoll = url.pathname === "/v1/events"
+        && request.method === "GET";
+      if (!isEventPoll) {
+        this.#logRequest(request, url);
+      }
       if (url.pathname === "/health" && request.method === "GET") {
         this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
@@ -82,7 +89,7 @@ export class BridgeApplication {
         return;
       }
       if (url.pathname === "/v1/events" && request.method === "GET") {
-        this.#sendEvents(url, response);
+        this.#sendEvents(request, url, response);
         return;
       }
 
@@ -158,18 +165,25 @@ export class BridgeApplication {
     this.fakeAgent.shutdown();
   }
 
-  #sendEvents(url: URL, response: ServerResponse): void {
+  #sendEvents(
+    request: IncomingMessage,
+    url: URL,
+    response: ServerResponse,
+  ): void {
     const sessionId = url.searchParams.get("sessionId");
     this.#requireFakeSession(sessionId ?? undefined);
     const after = parseBoundedInteger(url.searchParams.get("after"), "after", 0, Number.MAX_SAFE_INTEGER);
     const limit = parseBoundedInteger(url.searchParams.get("limit"), "limit", 1, MAX_EVENT_POLL_LIMIT);
     const events = this.events.after(FAKE_SESSION_ID, after, limit);
     const encoded = encodeEventBatch(events);
-    this.#verboseLog(
-      `bridge -> 3DS 200 events=${events.length} bytes=${encoded.byteLength}`,
-    );
-    for (const event of events) {
-      this.#verboseLog(`bridge -> 3DS event ${JSON.stringify(event)}`);
+    if (events.length > 0 || this.#verbosePolls) {
+      this.#logRequest(request, url);
+      this.#verboseLog(
+        `bridge -> 3DS 200 events=${events.length} bytes=${encoded.byteLength}`,
+      );
+      for (const event of events) {
+        this.#verboseLog(`bridge -> 3DS event ${JSON.stringify(event)}`);
+      }
     }
     response.writeHead(200, {
       "Content-Type": "application/x-ndjson; charset=utf-8",

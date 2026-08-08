@@ -29,20 +29,29 @@ accepted/replayed command kinds and byte counts without printing prompt content.
 
 ## Verbose protocol logging
 
-Add `--verbose` when you want to inspect the complete development exchange:
+Add `--verbose` when you want to inspect the meaningful development exchange:
 
 ```sh
 npm start -- --host 0.0.0.0 --port 8080 --verbose
 ```
 
-Verbose mode logs every request and response, exact text captures, approval JSON,
-command acknowledgements, and complete event envelopes. Microphone PCM is shown
-as received chunk sizes and running byte totals rather than raw binary samples.
-Because the 3DS polls frequently, empty event polls are also logged and output is
-intentionally high-volume. Client `0.1.1-stage1` adapts that cadence to roughly
-10 checks/second while an agent is working, 4/second while an approval is
-pending, and 1/second while idle. Those lines are bridge reads for outbound
-agent events, not unsolicited 3DS button input.
+Verbose mode logs meaningful requests and responses, exact text captures,
+approval JSON, command acknowledgements, and complete event envelopes.
+Microphone PCM is shown as received chunk sizes and running byte totals rather
+than raw binary samples. Empty event polls are hidden, so an idle 3DS no longer
+scrolls the terminal continuously.
+
+To diagnose polling itself, use the deliberately noisy option:
+
+```sh
+npm start -- --host 0.0.0.0 --port 8080 --verbose-polls
+```
+
+`--verbose-polls` implies `--verbose` and additionally logs every empty request
+and zero-event response. Client `0.1.1-stage1` checks roughly 10 times/second
+while an agent is working, 4/second while an approval is pending, and once per
+second while idle. Those lines are bridge reads for outbound agent events, not
+unsolicited 3DS button input.
 
 Verbose logs can contain sensitive prompts, agent output, commands, paths, and
 future adapter content. Enable the flag only for deliberate local debugging and
@@ -57,7 +66,8 @@ npm test
 Tests cover protocol version enforcement, session discovery, event ordering and
 replay, command deduplication, fake text streaming, interruption, approvals,
 audio/WAV capture, expired/ahead event cursors, safe default logging, and full
-verbose text/event/audio diagnostics.
+verbose text/event/audio diagnostics, suppression of empty polls, and the
+explicit noisy-poll override.
 
 This service is not safe for remote exposure. Pairing, credentials, policy, and
 encrypted remote transport are later stages.

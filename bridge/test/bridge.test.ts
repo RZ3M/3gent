@@ -33,6 +33,7 @@ interface TestBridge {
 interface StartBridgeOptions {
   logger?: (message: string) => void;
   verbose?: boolean;
+  verbosePolls?: boolean;
 }
 
 async function startBridge(
@@ -45,6 +46,7 @@ async function startBridge(
     fakeDeltaIntervalMs: 5,
     logger: options.logger ?? (() => undefined),
     verbose: options.verbose ?? false,
+    verbosePolls: options.verbosePolls ?? false,
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -452,6 +454,31 @@ test("verbose logging shows the full text, protocol events, and audio chunks", a
     )));
     assert.ok(messages.some((message) => message.includes(
       "3DS -> bridge audio chunk bytes=8 total=8",
+    )));
+    assert.ok(messages.every((message) => !message.includes("events=0")));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("empty event polls require the explicit verbose-polls option", async () => {
+  const messages: string[] = [];
+  const bridge = await startBridge({
+    logger: (message) => messages.push(message),
+    verbosePolls: true,
+  });
+  try {
+    const initial = await poll(bridge, 0);
+    const cursor = initial.at(-1)?.sequence ?? 0;
+    messages.length = 0;
+
+    const empty = await poll(bridge, cursor);
+    assert.deepEqual(empty, []);
+    assert.ok(messages.some((message) => message.includes(
+      "3DS -> bridge GET /v1/events",
+    )));
+    assert.ok(messages.some((message) => message.includes(
+      "bridge -> 3DS 200 events=0 bytes=0",
     )));
   } finally {
     await bridge.close();
