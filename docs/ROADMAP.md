@@ -54,7 +54,8 @@ We know whether the core client is technically viable on real hardware.
 
 ## Stage 1 — Local fake-agent vertical slice
 
-**Status:** Host implementation complete; physical 3DS vertical-slice test pending.
+**Status:** Host complete and core physical run reported working; detailed
+hardware/reliability checklist remains.
 
 Build a minimal local bridge abstraction.
 

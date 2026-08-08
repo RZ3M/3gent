@@ -12,10 +12,10 @@ import {
   MAX_TEXT_CAPTURE_BYTES,
   PROTOCOL_VERSION,
   ProtocolError,
+  protocolErrorBody,
   requireCommandId,
   requireProtocolVersion,
   sendJson,
-  sendProtocolError,
   type CommandAcknowledgement,
 } from "./protocol.js";
 import { savePcmRequestAsWav } from "./wav.js";
@@ -31,6 +31,7 @@ interface BridgeServerOptions {
   capturePath?: string;
   fakeDeltaIntervalMs?: number;
   logger?: (message: string) => void;
+  verbose?: boolean;
 }
 
 export class BridgeApplication {
@@ -39,11 +40,13 @@ export class BridgeApplication {
   readonly #commands = new CommandRegistry();
   readonly #capturePath: string;
   readonly #logger: (message: string) => void;
+  readonly #verbose: boolean;
   #audioCaptureActive = false;
 
   public constructor(options: BridgeServerOptions = {}) {
     this.#capturePath = options.capturePath ?? DEFAULT_CAPTURE_PATH;
     this.#logger = options.logger ?? console.log;
+    this.#verbose = options.verbose ?? false;
     this.fakeAgent = new FakeAgent(
       this.events,
       options.fakeDeltaIntervalMs ?? 80,
@@ -56,8 +59,9 @@ export class BridgeApplication {
   ): Promise<void> {
     try {
       const url = new URL(request.url ?? "/", "http://bridge.local");
+      this.#logRequest(request, url);
       if (url.pathname === "/health" && request.method === "GET") {
-        sendJson(response, 200, {
+        this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
           status: "ready",
           bridge: "3gent-stage1",
@@ -71,7 +75,7 @@ export class BridgeApplication {
       requireProtocolVersion(request.headers);
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
-        sendJson(response, 200, {
+        this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
           sessions: [this.fakeAgent.session()],
         });
@@ -85,7 +89,7 @@ export class BridgeApplication {
       const sessionMatch = SESSION_PATH.exec(url.pathname);
       if (sessionMatch !== null && request.method === "GET") {
         this.#requireFakeSession(sessionMatch[1]);
-        sendJson(response, 200, {
+        this.#sendJson(response, 200, {
           protocolVersion: PROTOCOL_VERSION,
           session: this.fakeAgent.session(),
         });
@@ -139,7 +143,11 @@ export class BridgeApplication {
         console.error(error);
       }
       if (!response.headersSent) {
-        sendProtocolError(response, protocolError);
+        this.#sendJson(
+          response,
+          protocolError.status,
+          protocolErrorBody(protocolError),
+        );
       } else {
         response.destroy();
       }
@@ -157,6 +165,12 @@ export class BridgeApplication {
     const limit = parseBoundedInteger(url.searchParams.get("limit"), "limit", 1, MAX_EVENT_POLL_LIMIT);
     const events = this.events.after(FAKE_SESSION_ID, after, limit);
     const encoded = encodeEventBatch(events);
+    this.#verboseLog(
+      `bridge -> 3DS 200 events=${events.length} bytes=${encoded.byteLength}`,
+    );
+    for (const event of events) {
+      this.#verboseLog(`bridge -> 3DS event ${JSON.stringify(event)}`);
+    }
     response.writeHead(200, {
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Content-Length": encoded.byteLength,
@@ -176,6 +190,7 @@ export class BridgeApplication {
     }
     const body = await drainBody(request, MAX_TEXT_CAPTURE_BYTES);
     const text = body.toString("utf8");
+    this.#verboseLog(`3DS -> bridge text ${JSON.stringify(text)}`);
     if (text.trim().length === 0) {
       throw new ProtocolError(400, "EMPTY_TEXT_CAPTURE", "text capture is empty");
     }
@@ -209,8 +224,16 @@ export class BridgeApplication {
     const commandId = requireCommandId(request.headers);
     const duplicate = this.#commands.get(commandId);
     if (duplicate !== undefined) {
-      await discardBody(request, MAX_AUDIO_BYTES);
-      sendJson(response, 200, duplicate);
+      await discardBody(
+        request,
+        MAX_AUDIO_BYTES,
+        this.#verbose
+          ? (chunkBytes, totalBytes) => this.#verboseLog(
+            `3DS -> bridge replayed audio chunk bytes=${chunkBytes} total=${totalBytes}`,
+          )
+          : undefined,
+      );
+      this.#sendJson(response, 200, duplicate);
       this.#logger("audio capture replayed");
       return;
     }
@@ -233,7 +256,16 @@ export class BridgeApplication {
 
     this.#audioCaptureActive = true;
     try {
-      const byteLength = await savePcmRequestAsWav(request, this.#capturePath);
+      const byteLength = await savePcmRequestAsWav(
+        request,
+        this.#capturePath,
+        MAX_AUDIO_BYTES,
+        this.#verbose
+          ? (chunkBytes, totalBytes) => this.#verboseLog(
+            `3DS -> bridge audio chunk bytes=${chunkBytes} total=${totalBytes}`,
+          )
+          : undefined,
+      );
       this.fakeAgent.submitAudio(byteLength);
       this.#sendNewAcknowledgement(response, commandId);
       this.#logger(`audio capture accepted: ${byteLength} PCM bytes`);
@@ -248,6 +280,9 @@ export class BridgeApplication {
     approvalId: string,
   ): Promise<void> {
     const body = await drainBody(request, 256);
+    this.#verboseLog(
+      `3DS -> bridge JSON ${JSON.stringify(body.toString("utf8"))}`,
+    );
     let parsed: unknown;
     try {
       parsed = JSON.parse(body.toString("utf8"));
@@ -276,7 +311,7 @@ export class BridgeApplication {
     const commandId = requireCommandId(request.headers);
     const duplicate = this.#commands.get(commandId);
     if (duplicate !== undefined) {
-      sendJson(response, 200, duplicate);
+      this.#sendJson(response, 200, duplicate);
       return true;
     }
     action();
@@ -297,7 +332,34 @@ export class BridgeApplication {
       lastSequence: this.events.latestSequence(FAKE_SESSION_ID),
     };
     this.#commands.remember(acknowledgement);
-    sendJson(response, 202, acknowledgement);
+    this.#sendJson(response, 202, acknowledgement);
+  }
+
+  #sendJson(response: ServerResponse, status: number, body: unknown): void {
+    this.#verboseLog(`bridge -> 3DS ${status} ${JSON.stringify(body)}`);
+    sendJson(response, status, body);
+  }
+
+  #logRequest(request: IncomingMessage, url: URL): void {
+    if (!this.#verbose) {
+      return;
+    }
+    const protocol = request.headers["x-3gent-protocol-version"] ?? "-";
+    const command = request.headers["x-3gent-command-id"] ?? "-";
+    const contentType = request.headers["content-type"] ?? "-";
+    const framing = request.headers["content-length"] !== undefined
+      ? `length=${request.headers["content-length"]}`
+      : `transfer=${request.headers["transfer-encoding"] ?? "-"}`;
+    this.#verboseLog(
+      `3DS -> bridge ${request.method ?? "UNKNOWN"} ${url.pathname}${url.search} `
+      + `protocol=${protocol} command=${command} content-type=${contentType} ${framing}`,
+    );
+  }
+
+  #verboseLog(message: string): void {
+    if (this.#verbose) {
+      this.#logger(`[${new Date().toISOString()}] ${message}`);
+    }
   }
 
   #requireFakeSession(sessionId: string | undefined): void {
@@ -348,6 +410,7 @@ async function drainBody(
 async function discardBody(
   request: IncomingMessage,
   maximumBytes: number,
+  onChunk?: (chunkBytes: number, totalBytes: number) => void,
 ): Promise<void> {
   let total = 0;
   for await (const rawChunk of request) {
@@ -355,6 +418,7 @@ async function discardBody(
     if (total > maximumBytes) {
       throw new ProtocolError(413, "BODY_TOO_LARGE", "request body exceeds its limit");
     }
+    onChunk?.(Buffer.byteLength(rawChunk as Uint8Array), total);
   }
 }
 

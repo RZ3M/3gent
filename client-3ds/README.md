@@ -15,8 +15,10 @@ The client currently provides:
 - fixed 2 KiB response storage and held-button scroll navigation.
 
 Stage 0 keyboard, LAN, streamed rendering, scrolling, sustained microphone
-capture, and warm-connection latency have passed on physical hardware. The
-Stage 1 vertical slice builds on the host and is awaiting the checklist below.
+capture, and warm-connection latency have passed on physical hardware. The first
+Stage 1 hardware run was reported as working well. The detailed
+reliability and usability checklist below remains the source of truth for the
+specific cases that have not yet been reported separately.
 
 ## Prerequisites
 
@@ -49,6 +51,10 @@ npm ci
 npm test
 npm start -- --host 0.0.0.0 --port 8080
 ```
+
+For full request, prompt, acknowledgement, event, and audio-chunk diagnostics,
+append `--verbose`. This prints sensitive prompt and agent content and should be
+used only for deliberate local debugging.
 
 Binding to `0.0.0.0` exposes an unauthenticated development service to the local
 network. Use a trusted LAN and disposable prompts. Do not expose it to the

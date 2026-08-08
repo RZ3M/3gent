@@ -30,13 +30,21 @@ interface TestBridge {
   close: () => Promise<void>;
 }
 
-async function startBridge(): Promise<TestBridge> {
+interface StartBridgeOptions {
+  logger?: (message: string) => void;
+  verbose?: boolean;
+}
+
+async function startBridge(
+  options: StartBridgeOptions = {},
+): Promise<TestBridge> {
   const directory = await mkdtemp(join(tmpdir(), "3gent-bridge-test-"));
   const capturePath = join(directory, "latest.wav");
   const {application, server} = createBridgeServer({
     capturePath,
     fakeDeltaIntervalMs: 5,
-    logger: () => undefined,
+    logger: options.logger ?? (() => undefined),
+    verbose: options.verbose ?? false,
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -372,4 +380,80 @@ test("rejects an event line that exceeds the protocol bound", () => {
       && "code" in error
       && error.code === "EVENT_TOO_LARGE",
   );
+});
+
+test("summary logging does not expose prompt content", async () => {
+  const messages: string[] = [];
+  const bridge = await startBridge({logger: (message) => messages.push(message)});
+  try {
+    const response = await request(
+      bridge,
+      "POST",
+      `/v1/sessions/${FAKE_SESSION_ID}/captures/text`,
+      "private default prompt",
+      {
+        [COMMAND_ID_HEADER]: "cmd_test_safe_logging",
+        "Content-Type": "text/plain",
+      },
+    );
+    assert.equal(response.status, 202);
+    assert.ok(messages.some((message) => message.includes("text capture accepted")));
+    assert.ok(messages.every((message) => !message.includes("private default prompt")));
+  } finally {
+    await bridge.close();
+  }
+});
+
+test("verbose logging shows the full text, protocol events, and audio chunks", async () => {
+  const messages: string[] = [];
+  const bridge = await startBridge({
+    logger: (message) => messages.push(message),
+    verbose: true,
+  });
+  try {
+    const textResponse = await request(
+      bridge,
+      "POST",
+      `/v1/sessions/${FAKE_SESSION_ID}/captures/text`,
+      "full verbose prompt",
+      {
+        [COMMAND_ID_HEADER]: "cmd_test_verbose_logging",
+        "Content-Type": "text/plain",
+      },
+    );
+    assert.equal(textResponse.status, 202);
+    await waitForEvent(bridge, "turn.completed");
+
+    const pcm = Buffer.from([0, 0, 16, 0, 32, 0, 48, 0]);
+    const audioResponse = await request(
+      bridge,
+      "POST",
+      `/v1/sessions/${FAKE_SESSION_ID}/captures/audio`,
+      pcm,
+      {
+        [COMMAND_ID_HEADER]: "cmd_test_verbose_audio",
+        "Content-Type": "application/x-3gent-pcm; "
+          + "format=s16le; rate=16364; channels=1",
+      },
+    );
+    assert.equal(audioResponse.status, 202);
+
+    assert.ok(messages.some((message) => message.includes(
+      "command=cmd_test_verbose_logging",
+    )));
+    assert.ok(messages.some((message) => message.includes(
+      '3DS -> bridge text "full verbose prompt"',
+    )));
+    assert.ok(messages.some((message) => message.includes(
+      "bridge -> 3DS 202",
+    )));
+    assert.ok(messages.some((message) => message.includes(
+      '"type":"assistant.text.delta"',
+    )));
+    assert.ok(messages.some((message) => message.includes(
+      "3DS -> bridge audio chunk bytes=8 total=8",
+    )));
+  } finally {
+    await bridge.close();
+  }
 });

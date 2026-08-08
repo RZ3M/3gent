@@ -134,6 +134,11 @@ Logs must avoid:
 - full sensitive prompts by default;
 - arbitrary repository file contents unless explicitly enabled for debugging.
 
+The local bridge may expose exact prompts and protocol payloads only through an
+explicit diagnostic flag such as `--verbose`. That mode must display a warning,
+must remain off by default, and must summarize binary media rather than dumping
+raw audio. Verbose terminal output should be treated as sensitive user data.
+
 ## 11. Security TODO before public remote beta
 
 - document device credential format;

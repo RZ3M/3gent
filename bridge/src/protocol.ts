@@ -129,11 +129,8 @@ export function sendJson(
   response.end(encoded);
 }
 
-export function sendProtocolError(
-  response: ServerResponse,
-  error: ProtocolError,
-): void {
-  const body: ProtocolErrorBody = {
+export function protocolErrorBody(error: ProtocolError): ProtocolErrorBody {
+  return {
     protocolVersion: PROTOCOL_VERSION,
     error: {
       code: error.code,
@@ -141,7 +138,6 @@ export function sendProtocolError(
       retryable: error.retryable,
     },
   };
-  sendJson(response, error.status, body);
 }
 
 export function encodeEventBatch(events: readonly EventEnvelope[]): Buffer {

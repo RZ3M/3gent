@@ -33,6 +33,7 @@ export async function savePcmRequestAsWav(
   request: IncomingMessage,
   capturePath: string,
   maximumBytes = MAX_AUDIO_BYTES,
+  onChunk?: (chunkBytes: number, totalBytes: number) => void,
 ): Promise<number> {
   const temporaryPath = `${capturePath}.tmp`;
   await mkdir(dirname(capturePath), {recursive: true});
@@ -54,6 +55,7 @@ export async function savePcmRequestAsWav(
         );
       }
       await file.write(chunk);
+      onChunk?.(chunk.byteLength, total);
     }
 
     if (total === 0 || total % 2 !== 0) {

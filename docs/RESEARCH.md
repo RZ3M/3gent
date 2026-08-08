@@ -472,7 +472,7 @@ Herdr exposes agent-aware control primitives over persistent terminal panes and 
 **Question:** Can the proven handheld paths support a production-shaped,
 agent-agnostic local session loop before a real agent is introduced?
 
-**Status:** HOST PASS / PHYSICAL 3DS VERTICAL-SLICE TEST TODO
+**Status:** HOST PASS / CORE HARDWARE PASS REPORTED / DETAILED CHECKLIST TODO
 
 **2026-08-07 implementation record:**
 
@@ -485,9 +485,10 @@ agent-agnostic local session loop before a real agent is introduced?
 - The deterministic fake adapter exposes one session and exercises text deltas,
   working/idle/waiting states, interruption, approve/decline behavior, and the
   existing streamed microphone/WAV path.
-- Nine automated tests pass for version enforcement, session discovery,
+- Eleven automated tests pass for version enforcement, session discovery,
   ordered event streaming/replay, text and audio command deduplication,
-  approvals, interruption, WAV output, invalid cursors, and oversized events.
+  approvals, interruption, WAV output, invalid cursors, oversized events, and
+  safe-default versus verbose diagnostic logging.
 - The `0.1.0-stage1` 3DS client sends protocol-v1 commands, polls up to three
   events roughly every 100 ms over its warm control connection, ignores unknown
   event types after advancing its cursor, renders text deltas, and exposes the
@@ -506,8 +507,22 @@ agent-agnostic local session loop before a real agent is introduced?
   timing, Stage 1 audio behavior, cursor resync behavior, long-idle socket
   recovery, server restart, sleep/resume, and Old versus New 3DS performance.
 
-**Conclusion:** the host-side vertical slice is reproducible and bounded. Do
-not begin the Codex adapter until the main physical Stage 1 checklist passes.
+**2026-08-07 first Stage 1 hardware report:**
+
+- The user ran the Stage 1 client and bridge together and reported that it works
+  great.
+- This is a qualitative core pass for the vertical slice. Individual results for
+  interruption, both approval choices, long-idle reconnect, bridge restart,
+  audio quality, sleep/resume, exact latency, and hardware model were not
+  separately reported, so those checklist items remain open.
+- Follow-up: the bridge now has an opt-in `--verbose` mode for the next focused
+  tests. It logs exact text/JSON and outbound event envelopes, while PCM remains
+  summarized as chunk and total byte counts. Default logs continue to omit full
+  prompt content.
+
+**Conclusion:** the host-side vertical slice is reproducible, bounded, and has
+a qualitative core hardware pass. Complete the focused Stage 1 reliability and
+interaction checks before beginning the Codex adapter.
 
 ---
 

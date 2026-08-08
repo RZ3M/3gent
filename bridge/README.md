@@ -27,6 +27,24 @@ approval. Audio is saved to `bridge/data/latest.wav`, emits capture metadata,
 and uses a mock transcript to exercise the same turn pipeline. The terminal logs
 accepted/replayed command kinds and byte counts without printing prompt content.
 
+## Verbose protocol logging
+
+Add `--verbose` when you want to inspect the complete development exchange:
+
+```sh
+npm start -- --host 0.0.0.0 --port 8080 --verbose
+```
+
+Verbose mode logs every request and response, exact text captures, approval JSON,
+command acknowledgements, and complete event envelopes. Microphone PCM is shown
+as received chunk sizes and running byte totals rather than raw binary samples.
+Because the 3DS polls frequently, empty event polls are also logged and output is
+intentionally high-volume.
+
+Verbose logs can contain sensitive prompts, agent output, commands, paths, and
+future adapter content. Enable the flag only for deliberate local debugging and
+do not publish or commit captured terminal logs.
+
 ## Test
 
 ```sh
@@ -35,7 +53,8 @@ npm test
 
 Tests cover protocol version enforcement, session discovery, event ordering and
 replay, command deduplication, fake text streaming, interruption, approvals,
-audio/WAV capture, and expired/ahead event cursors.
+audio/WAV capture, expired/ahead event cursors, safe default logging, and full
+verbose text/event/audio diagnostics.
 
 This service is not safe for remote exposure. Pairing, credentials, policy, and
 encrypted remote transport are later stages.

@@ -54,7 +54,9 @@ The new `bridge/` service is a TypeScript/Node implementation of the Stage 1
 agent boundary with a deterministic fake adapter. Its automated tests cover the
 protocol version, sessions, ordered/replayed events, duplicate commands,
 approvals, interruption, and streamed audio/WAV output. The `0.1.0-stage1` 3DS
-client builds successfully and is ready for its physical vertical-slice test.
+client builds successfully, and its first physical vertical-slice run was
+reported as working well. Detailed reliability cases remain on the hardware
+checklist.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 physical Stage 1 checklist. See [`bridge/README.md`](bridge/README.md) for the
@@ -117,9 +119,11 @@ Codex supports repository-level `AGENTS.md` instructions, so this repo uses `AGE
 
 **Stage 1: local fake-agent vertical slice.**
 
-The host implementation is complete and the 3DS build is ready for physical
-testing. The next stage is the first real desktop adapter; remote relay and
-production authentication remain deliberately deferred.
+The host implementation is complete and the core physical Stage 1 run works.
+Focused approval, interruption, reconnect, long-idle, audio-quality, and
+sleep/resume results are still being recorded before the first real desktop
+adapter; remote relay and production authentication remain deliberately
+deferred.
 
 ## License status
 
