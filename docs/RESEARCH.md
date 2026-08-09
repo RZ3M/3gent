@@ -969,6 +969,64 @@ GPU still owned by citro3d.
 
 ---
 
+## R-022 — Task switching, touch, and context-aware controls
+
+**Question:** Can the handheld carry more than one coding-agent task at a time —
+showing which of them needs the user, and moving between them — using the
+hardware the 3DS actually has, without a new bridge capability?
+
+**Status:** HOST BUILD PASSED / LAYOUT REVIEWED OFF DEVICE / HARDWARE PENDING
+
+**2026-08-09 implementation record:**
+
+- Host: macOS 26.5.2, Darwin 25.6.0, arm64. Toolchain: devkitARM r68,
+  libctru 2.7.0. Clean under the project's `-Wall -Wextra -Werror`.
+- No bridge or protocol change was required. `/v1/sessions` already returns
+  `state`, `pendingApprovalId` and `lastSequence` per session, which is exactly
+  what a cross-task attention indicator needs.
+
+Four questions had to be answered rather than guessed:
+
+1. **Where touch geometry lives.** Putting hit rectangles in `main.c` would let
+   them drift from what `ui.c` draws, silently, with no way to catch it off
+   device. `ui_hit_test` therefore lives in `ui.c` and calls the same layout
+   helpers the renderer calls (`ui_action_rect`, `ui_rail_first`,
+   `ui_task_list_first`, `ui_hit_row`). It stays pure, so the preview harness
+   still compiles the file unmodified.
+2. **Touch position after release.** Firing on release is what makes a mis-aimed
+   stylus recoverable, but `hidTouchRead` reports the origin once contact ends,
+   and the origin is a live target — the first task tab. The last held point is
+   retained and the release is judged against that. This was found by reasoning
+   about the libctru contract, not on screen, and is the single most likely
+   place for a hardware surprise.
+3. **Whether cross-task state can be live without fighting the control slot.**
+   Exactly one control request may be in flight. The background refresh starts
+   only when the slot is idle, runs at most every five seconds, and every
+   foreground request cancels it first. It is skipped entirely while recording.
+4. **What a task switch costs.** Switching stops the pushed link, POSTs
+   `/resume`, resets the cursor to zero and restarts the link, so the bridge
+   replays that task's history. Replay exposed a pre-existing defect: the 4 KiB
+   response buffer filled and then discarded everything that followed, meaning a
+   switched-to task would show its oldest output and stop. `append_response` now
+   drops whole lines from the front instead.
+
+**Off-device review:** `tools/ui-preview/` covers twenty states, including four
+that exist only because of this change (busy rail with the scroll cluster live,
+windowed task list, approval under a stylus, and a touched menu row). It caught
+four real defects: a four-across action label truncating to "Ne...", a status
+band too short for three lines of text, "Start a new task" offered while the
+bridge was unreachable, and the photo upload naming itself twice.
+
+**Conclusion:** multi-task monitoring needs no protocol work; it needed the
+bottom screen to stop being a decorative second display. Pending hardware
+evidence: whether 70 px action buttons and 32 px task tabs are comfortable
+stylus targets on a physical panel; whether the 450 ms approval arming delay
+feels protective or obstructive; whether the five-second background refresh is
+visible in battery or frame rate; and whether a task switch's stop/resume/replay
+round trip is fast enough to feel like switching rather than reconnecting.
+
+---
+
 ## Experiment template
 
 When closing a research item, add:

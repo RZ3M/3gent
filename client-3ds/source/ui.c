@@ -53,7 +53,12 @@
 #define UI_SCRATCH_CAPACITY    512
 #define UI_WRAP_SLOT_RESPONSE  0
 #define UI_WRAP_SLOT_CARD      1
-#define UI_WRAP_SLOTS          2
+/*
+ * The bottom screen wraps the same approval text as the top card but to a
+ * different width, so it gets its own slot rather than thrashing the card's.
+ */
+#define UI_WRAP_SLOT_HERO      2
+#define UI_WRAP_SLOTS          3
 #define UI_WRAP_MAX_LINES      192
 #define UI_WAVE_BARS           28
 
@@ -598,6 +603,53 @@ static UiAgentBadge ui_agent_badge(const UiModel *model)
     return badge;
 }
 
+static u32 ui_task_accent(UiTaskState state)
+{
+    switch (state) {
+        case UI_TASK_WORKING:   return UI_AMBER;
+        case UI_TASK_ATTENTION: return UI_CORAL;
+        case UI_TASK_FAILED:    return UI_ROSE;
+        case UI_TASK_IDLE:      return UI_MINT;
+        case UI_TASK_UNKNOWN:
+        default:                return UI_INK_FAINT;
+    }
+}
+
+static const char *ui_task_state_word(UiTaskState state)
+{
+    switch (state) {
+        case UI_TASK_WORKING:   return "WORKING";
+        case UI_TASK_ATTENTION: return "NEEDS YOU";
+        case UI_TASK_FAILED:    return "FAILED";
+        case UI_TASK_IDLE:      return "READY";
+        case UI_TASK_UNKNOWN:
+        default:                return "UNKNOWN";
+    }
+}
+
+/*
+ * Tasks that want the user, excluding the one already on screen. This is the
+ * number that decides whether it is worth leaving the current task, so it is
+ * shown wherever the user might be about to stop paying attention.
+ */
+static unsigned int ui_attention_elsewhere(const UiModel *model)
+{
+    unsigned int count = 0;
+    if (model->tasks == NULL) {
+        return 0;
+    }
+    for (size_t index = 0; index < model->task_count; index++) {
+        if (model->task_active_valid && index == model->task_active) {
+            continue;
+        }
+        if (model->tasks[index].state == UI_TASK_ATTENTION
+            || model->tasks[index].unread) {
+            count++;
+        }
+    }
+    return count;
+}
+
 static u32 ui_link_color(const UiModel *model)
 {
     const char *state = model->link_state != NULL ? model->link_state : "";
@@ -682,19 +734,49 @@ static void ui_top_header(const UiModel *model, const char *subtitle)
     ui_fill(0.0f, UI_HEADER_H - 1.0f, UI_TOP_W, 1.0f, UI_LINE);
 
     ui_draw(UI_PAD, 6.0f, UI_SCALE_WORDMARK, UI_INK, C2D_AlignLeft, "3gent");
-    const float wordmark_end =
-        UI_PAD + ui_measure("3gent", UI_SCALE_WORDMARK);
+    float cursor = UI_PAD + ui_measure("3gent", UI_SCALE_WORDMARK);
 
     const UiAgentBadge badge = ui_agent_badge(model);
     ui_badge(UI_TOP_W - UI_PAD, 7.0f, &badge);
     const float badge_left =
         UI_TOP_W - UI_PAD - ui_measure(badge.label, UI_SCALE_MICRO) - 28.0f;
 
-    ui_dot(wordmark_end + 7.0f, 15.0f, 1.5f, UI_INK_FAINT);
+    ui_dot(cursor + 7.0f, 15.0f, 1.5f, UI_INK_FAINT);
+    cursor += 14.0f;
+
+    /*
+     * Which of how many. Without it, switching tasks changes the label and the
+     * user has no way to tell whether they moved one step or wrapped around.
+     * The manager states the same thing on its card, so it does not repeat it.
+     */
+    if (model->screen == UI_SCREEN_MAIN
+        && model->task_active_valid
+        && model->task_count > 1) {
+        char position[16];
+        snprintf(
+            position,
+            sizeof(position),
+            "%u/%u",
+            (unsigned int)(model->task_active + 1),
+            (unsigned int)model->task_count
+        );
+        const float chip_width = ui_measure(position, UI_SCALE_MICRO) + 12.0f;
+        ui_panel(cursor, 9.0f, chip_width, 13.0f, 2.0f, UI_BG2);
+        ui_draw(
+            cursor + chip_width / 2.0f,
+            10.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignCenter,
+            position
+        );
+        cursor += chip_width + 6.0f;
+    }
+
     ui_draw_clipped(
-        wordmark_end + 14.0f,
+        cursor,
         11.0f,
-        badge_left - wordmark_end - 22.0f,
+        badge_left - cursor - 8.0f,
         UI_SCALE_LABEL,
         UI_INK_DIM,
         C2D_AlignLeft,
@@ -777,7 +859,7 @@ static void ui_listening_body(const UiModel *model)
         UI_SCALE_MICRO,
         UI_INK_FAINT,
         C2D_AlignCenter,
-        "release R to transcribe, or keep holding"
+        "release to transcribe, or keep holding"
     );
 }
 
@@ -1013,15 +1095,34 @@ static void ui_top_footer(const UiModel *model)
         );
     }
 
-    ui_drawf(
-        UI_TOP_W - UI_PAD,
-        y,
-        UI_SCALE_MICRO,
-        UI_INK_FAINT,
-        C2D_AlignRight,
-        "evt %u",
-        model->event_cursor
-    );
+    /*
+     * The right slot belongs to whatever most deserves the user's next glance:
+     * another task waiting on them beats the event cursor, which is diagnostic.
+     */
+    const unsigned int waiting = ui_attention_elsewhere(model);
+    if (waiting > 0) {
+        ui_drawf(
+            UI_TOP_W - UI_PAD,
+            y,
+            UI_SCALE_MICRO,
+            UI_CORAL,
+            C2D_AlignRight,
+            "%u other task%s need%s you",
+            waiting,
+            waiting == 1 ? "" : "s",
+            waiting == 1 ? "s" : ""
+        );
+    } else {
+        ui_drawf(
+            UI_TOP_W - UI_PAD,
+            y,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignRight,
+            "evt %u",
+            model->event_cursor
+        );
+    }
 }
 
 static void ui_render_top_main(const UiModel *model)
@@ -1042,7 +1143,7 @@ static void ui_render_top_main(const UiModel *model)
             model->approval_summary != NULL && model->approval_summary[0] != '\0'
                 ? model->approval_summary
                 : "The agent is asking for permission to continue.",
-            "X  approve once        B  decline"
+            "A  approve once        B  decline"
         );
     } else if (model->transcript_ready) {
         ui_attention_card(
@@ -1058,21 +1159,125 @@ static void ui_render_top_main(const UiModel *model)
 
 /* ---------------------------------------------------- bottom: main screen -- */
 
-#define UI_STATUS_H     52.0f
-#define UI_HERO_Y       52.0f
-#define UI_HERO_H       96.0f
-#define UI_CHIPS_Y      148.0f
+/*
+ * The bottom screen is the action surface and the only touchable one, so its
+ * bands are fixed and shared by every screen. `ui_hit_test` walks the same
+ * geometry the renderer draws, which is what keeps a target underneath the
+ * thing that looks like it.
+ *
+ *   0   task rail        (main screen only)
+ *   32  status band      what is happening, plus the scroll cluster
+ *   76  content          hero, list, or decision
+ *   152 action bar       only the actions that are live right now
+ *   204 status bar       link, endpoint, capabilities
+ */
+#define UI_RAIL_H       32.0f
+#define UI_RAIL_TABS    4u
+#define UI_RAIL_MORE_W  42.0f
+#define UI_STATUS_H     46.0f
+#define UI_CONTENT_Y    (UI_RAIL_H + UI_STATUS_H)
+#define UI_ACTIONS_Y    152.0f
+#define UI_ACTIONS_H    52.0f
 #define UI_BAR_Y        204.0f
 
-static void ui_bottom_status(const UiModel *model, bool busy)
+#define UI_ACTIONS_MAX  4u
+#define UI_ACTION_MARGIN 10.0f
+#define UI_ACTION_GAP    6.0f
+
+/* One live action: a button on screen, a physical key, and the same handler. */
+typedef struct {
+    UiHitKind hit;
+    const char *cap;
+    const char *label;
+    u32 accent;
+} UiAction;
+
+/* ------------------------------------------------------- scroll cluster -- */
+
+#define UI_SCROLL_BUTTON   26.0f
+#define UI_SCROLL_GAP      4.0f
+#define UI_SCROLL_CLUSTER_W \
+    (3.0f * UI_SCROLL_BUTTON + 2.0f * UI_SCROLL_GAP)
+
+static float ui_scroll_cluster_x(void)
 {
-    ui_fill(0.0f, 0.0f, UI_BOT_W, UI_STATUS_H, UI_BG1);
-    ui_fill(0.0f, UI_STATUS_H - 1.0f, UI_BOT_W, 1.0f, UI_LINE);
+    return UI_BOT_W - 10.0f - UI_SCROLL_CLUSTER_W;
+}
+
+static void ui_triangle_glyph(float center_x, float center_y, float size, int direction, u32 color)
+{
+    const float half = size / 2.0f;
+    if (direction < 0) {
+        C2D_DrawTriangle(
+            center_x, center_y - half, color,
+            center_x - half, center_y + half, color,
+            center_x + half, center_y + half, color,
+            0.0f
+        );
+    } else {
+        C2D_DrawTriangle(
+            center_x, center_y + half, color,
+            center_x - half, center_y - half, color,
+            center_x + half, center_y - half, color,
+            0.0f
+        );
+    }
+}
+
+/*
+ * Reading a long answer is the most common thing to do on this screen and the
+ * top screen cannot be touched, so scrolling gets its own targets. It appears
+ * only when there is something above the fold.
+ */
+static void ui_scroll_cluster(const UiModel *model, float band_y)
+{
+    const float x = ui_scroll_cluster_x();
+    const float y = band_y + (UI_STATUS_H - UI_SCROLL_BUTTON) / 2.0f;
+    const bool at_latest = model->scroll_lines == 0;
+    const bool at_oldest = model->scroll_lines >= ui_max_scroll(model);
+
+    for (int index = 0; index < 3; index++) {
+        const float button_x = x + (float)index * (UI_SCROLL_BUTTON + UI_SCROLL_GAP);
+        const bool live = index == 0 ? !at_oldest : (index == 1 ? !at_latest : !at_latest);
+        const u32 ink = live ? UI_INK : ui_alpha(UI_INK_FAINT, 130);
+        ui_panel_outlined(
+            button_x,
+            y,
+            UI_SCROLL_BUTTON,
+            UI_SCROLL_BUTTON,
+            2.0f,
+            live ? UI_BG2 : ui_blend(UI_BG2, 130, UI_BG1),
+            live ? UI_LINE : ui_blend(UI_LINE, 110, UI_BG1)
+        );
+        const float center_x = button_x + UI_SCROLL_BUTTON / 2.0f;
+        const float center_y = y + UI_SCROLL_BUTTON / 2.0f;
+        if (index == 2) {
+            /* Jump to the newest line: an arrow that lands on a floor rule. */
+            ui_triangle_glyph(center_x, center_y - 2.0f, 7.0f, 1, ink);
+            ui_fill(center_x - 5.0f, center_y + 6.0f, 10.0f, 2.0f, ink);
+        } else {
+            ui_triangle_glyph(center_x, center_y, 9.0f, index == 0 ? -1 : 1, ink);
+        }
+    }
+}
+
+static void ui_bottom_status(const UiModel *model, float y, bool busy)
+{
+    ui_fill(0.0f, y, UI_BOT_W, UI_STATUS_H, UI_BG1);
+    ui_fill(0.0f, y + UI_STATUS_H - 1.0f, UI_BOT_W, 1.0f, UI_LINE);
+
+    /* The scroll cluster claims the right end, so the text stops short of it. */
+    const bool scrollable = model->screen == UI_SCREEN_MAIN
+        && !model->recording
+        && ui_max_scroll(model) > 0;
+    const float text_width = scrollable
+        ? UI_BOT_W - 14.0f - UI_SCROLL_CLUSTER_W - 20.0f
+        : UI_BOT_W - (busy ? 44.0f : 28.0f);
 
     ui_draw_clipped(
         14.0f,
-        10.0f,
-        UI_BOT_W - 52.0f,
+        y + 3.0f,
+        text_width,
         UI_SCALE_HEAD,
         UI_INK,
         C2D_AlignLeft,
@@ -1080,8 +1285,8 @@ static void ui_bottom_status(const UiModel *model, bool busy)
     );
     ui_draw_clipped(
         14.0f,
-        28.0f,
-        UI_BOT_W - 28.0f,
+        y + 21.0f,
+        text_width,
         UI_SCALE_MICRO,
         UI_INK_DIM,
         C2D_AlignLeft,
@@ -1089,16 +1294,345 @@ static void ui_bottom_status(const UiModel *model, bool busy)
     );
     ui_draw_clipped(
         14.0f,
-        39.0f,
-        UI_BOT_W - 28.0f,
+        y + 32.0f,
+        text_width,
         UI_SCALE_MICRO,
         ui_alpha(UI_INK_FAINT, 220),
         C2D_AlignLeft,
         model->detail_secondary != NULL ? model->detail_secondary : ""
     );
-    if (busy) {
-        ui_spinner(UI_BOT_W - 20.0f, 18.0f, 5.0f, 1.7f, UI_AZURE);
+    if (busy && !scrollable) {
+        ui_spinner(UI_BOT_W - 20.0f, y + 15.0f, 5.0f, 1.7f, UI_AZURE);
     }
+    if (scrollable) {
+        ui_scroll_cluster(model, y);
+    }
+}
+
+/* ------------------------------------------------------------- task rail -- */
+
+/*
+ * Which slice of the task list the rail shows. Derived only from the active
+ * index and the count, so the rail never depends on retained scroll state and
+ * the hit test can recompute it exactly.
+ */
+static size_t ui_rail_first(const UiModel *model, size_t *visible)
+{
+    size_t shown = model->task_count < UI_RAIL_TABS
+        ? model->task_count
+        : UI_RAIL_TABS;
+    *visible = shown;
+    if (model->task_count <= UI_RAIL_TABS || !model->task_active_valid) {
+        return 0;
+    }
+    size_t first = 0;
+    if (model->task_active >= UI_RAIL_TABS) {
+        first = model->task_active - UI_RAIL_TABS + 1;
+    }
+    if (first + UI_RAIL_TABS > model->task_count) {
+        first = model->task_count - UI_RAIL_TABS;
+    }
+    return first;
+}
+
+static float ui_rail_tab_width(size_t visible)
+{
+    if (visible == 0) {
+        return 0.0f;
+    }
+    return (UI_BOT_W - UI_RAIL_MORE_W) / (float)visible;
+}
+
+static void ui_rail_tab(
+    const UiModel *model,
+    const UiTask *task,
+    float x,
+    float width,
+    bool active
+)
+{
+    const u32 accent = ui_task_accent(task->state);
+    const bool pressed = model->touch_down
+        && (float)model->touch_x >= x
+        && (float)model->touch_x < x + width
+        && (float)model->touch_y < UI_RAIL_H;
+
+    if (active) {
+        ui_fill(x, 0.0f, width, UI_RAIL_H - 1.0f, UI_BG2);
+        ui_fill(x, 0.0f, width, 2.0f, accent);
+    } else if (pressed) {
+        ui_fill(x, 0.0f, width, UI_RAIL_H - 1.0f, ui_blend(UI_AZURE, 30, UI_BG0));
+    }
+    ui_fill(x + width - 1.0f, 4.0f, 1.0f, UI_RAIL_H - 9.0f, ui_alpha(UI_LINE, 200));
+
+    const float dot_x = x + 10.0f;
+    const float dot_y = UI_RAIL_H / 2.0f;
+    if (task->state == UI_TASK_WORKING) {
+        ui_spinner(dot_x, dot_y, 4.0f, 1.4f, accent);
+    } else {
+        ui_dot(dot_x, dot_y, task->state == UI_TASK_ATTENTION ? 4.0f : 3.0f, accent);
+        if (task->state == UI_TASK_ATTENTION) {
+            /* A halo, so "needs you" is not carried by hue alone. */
+            const float pulse = 0.5f + 0.5f * sinf(
+                (float)(frame_time_ms % 1400u) / 1400.0f * 2.0f * (float)M_PI
+            );
+            ui_dot(dot_x, dot_y, 7.0f, ui_alpha(accent, (u8)(30.0f + 50.0f * pulse)));
+        }
+    }
+
+    ui_draw_clipped(
+        x + 19.0f,
+        UI_RAIL_H / 2.0f - 7.0f,
+        width - 25.0f - (task->unread ? 8.0f : 0.0f),
+        UI_SCALE_MICRO,
+        active ? UI_INK : UI_INK_DIM,
+        C2D_AlignLeft,
+        task->label != NULL ? task->label : "task"
+    );
+    if (task->unread && !active) {
+        ui_dot(x + width - 8.0f, UI_RAIL_H / 2.0f - 3.0f, 2.5f, UI_AZURE);
+    }
+}
+
+/*
+ * The rail is the answer to "what else is running, and does any of it need me".
+ * It is always one tap or one D-pad press away from another task.
+ */
+static void ui_task_rail(const UiModel *model)
+{
+    ui_fill(0.0f, 0.0f, UI_BOT_W, UI_RAIL_H, UI_BG1);
+    ui_fill(0.0f, UI_RAIL_H - 1.0f, UI_BOT_W, 1.0f, UI_LINE);
+
+    size_t visible = 0;
+    const size_t first = ui_rail_first(model, &visible);
+    const float tab_width = ui_rail_tab_width(visible);
+
+    for (size_t slot = 0; slot < visible; slot++) {
+        const size_t index = first + slot;
+        ui_rail_tab(
+            model,
+            &model->tasks[index],
+            (float)slot * tab_width,
+            tab_width,
+            model->task_active_valid && index == model->task_active
+        );
+    }
+
+    if (visible == 0) {
+        ui_draw(
+            14.0f,
+            UI_RAIL_H / 2.0f - 7.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignLeft,
+            "no other tasks"
+        );
+    }
+
+    /* Manager button: a list glyph, plus a badge when something else waits. */
+    const float more_x = UI_BOT_W - UI_RAIL_MORE_W;
+    const bool pressed = model->touch_down
+        && (float)model->touch_x >= more_x
+        && (float)model->touch_y < UI_RAIL_H;
+    ui_fill(
+        more_x,
+        0.0f,
+        UI_RAIL_MORE_W,
+        UI_RAIL_H - 1.0f,
+        pressed ? ui_blend(UI_AZURE, 40, UI_BG1) : UI_BG1
+    );
+    ui_fill(more_x, 4.0f, 1.0f, UI_RAIL_H - 9.0f, ui_alpha(UI_LINE, 200));
+    for (int line = 0; line < 3; line++) {
+        const float line_y = 10.0f + (float)line * 5.0f;
+        ui_fill(more_x + 12.0f, line_y, 2.0f, 2.0f, UI_INK_DIM);
+        ui_fill(more_x + 16.0f, line_y, 9.0f, 2.0f, UI_INK_DIM);
+    }
+    const unsigned int waiting = ui_attention_elsewhere(model);
+    if (waiting > 0) {
+        ui_dot(more_x + UI_RAIL_MORE_W - 9.0f, 9.0f, 5.0f, UI_CORAL);
+        ui_drawf(
+            more_x + UI_RAIL_MORE_W - 9.0f,
+            3.0f,
+            UI_SCALE_MICRO,
+            UI_BG0,
+            C2D_AlignCenter,
+            "%u",
+            waiting > 9 ? 9u : waiting
+        );
+    }
+}
+
+/* ------------------------------------------------------------ action bar -- */
+
+/*
+ * Every screen answers "what can I do right now" with this list, and nothing
+ * else is drawn. An action that is not currently possible is absent rather than
+ * dimmed, because a permanent row of dead keys teaches the user to ignore it.
+ */
+static size_t ui_actions_for(const UiModel *model, UiAction *actions)
+{
+    size_t count = 0;
+
+    switch (model->screen) {
+        case UI_SCREEN_MAIN:
+            if (model->recording) {
+                break;
+            }
+            if (model->approval_pending) {
+                actions[count++] = (UiAction){ UI_HIT_PRIMARY, "A", "Approve once", UI_CORAL };
+                actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Decline", UI_INK_DIM };
+                break;
+            }
+            if (model->transcript_ready) {
+                actions[count++] = (UiAction){ UI_HIT_PRIMARY, "A", "Send", UI_MINT };
+                actions[count++] = (UiAction){ UI_HIT_TERTIARY, "Y", "Edit", UI_AZURE };
+                actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Cancel", UI_INK_DIM };
+                break;
+            }
+            if (model->turn_active) {
+                actions[count++] = (UiAction){ UI_HIT_SECONDARY, "X", "Interrupt", UI_ROSE };
+                actions[count++] = (UiAction){ UI_HIT_TASK_LIST, "B", "Tasks", UI_INK_DIM };
+                break;
+            }
+            /* Four across is 70 px each: labels have to be one short word. */
+            actions[count++] = (UiAction){ UI_HIT_PRIMARY, "A", "Type", UI_MINT };
+            actions[count++] = (UiAction){ UI_HIT_PHOTO, "L", "Photo", UI_AZURE };
+            actions[count++] = (UiAction){ UI_HIT_SECONDARY, "X", "New", UI_VIOLET };
+            actions[count++] = (UiAction){ UI_HIT_TASK_LIST, "B", "Tasks", UI_INK_DIM };
+            break;
+
+        case UI_SCREEN_PHOTO:
+            if (model->photo_progress_percent != UI_PHOTO_PROGRESS_NONE) {
+                break;
+            }
+            actions[count++] = (UiAction){ UI_HIT_PRIMARY, "A", "Attach", UI_MINT };
+            actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Discard", UI_INK_DIM };
+            break;
+
+        case UI_SCREEN_PAIRING:
+            if (model->pairing_phase == UI_PAIRING_SUCCEEDED) {
+                actions[count++] = (UiAction){ UI_HIT_PRIMARY, "A", "Continue", UI_MINT };
+                actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Start screen", UI_INK_DIM };
+            } else if (model->pairing_phase == UI_PAIRING_FAILED) {
+                actions[count++] = (UiAction){ UI_HIT_PRIMARY, "A", "Scan again", UI_AZURE };
+                actions[count++] = (UiAction){ UI_HIT_TERTIARY, "Y", "Type code", UI_INK_DIM };
+                actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Back", UI_INK_DIM };
+            } else if (model->pairing_phase == UI_PAIRING_AIMING) {
+                actions[count++] = (UiAction){ UI_HIT_TERTIARY, "Y", "Type code", UI_AZURE };
+                actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Cancel", UI_INK_DIM };
+            } else {
+                actions[count++] = (UiAction){ UI_HIT_BACK, "B", "Cancel", UI_INK_DIM };
+            }
+            break;
+
+        case UI_SCREEN_BOOT:
+        case UI_SCREEN_HOME:
+        case UI_SCREEN_SESSIONS:
+        default:
+            break;
+    }
+    return count;
+}
+
+static void ui_action_rect(
+    size_t index,
+    size_t count,
+    float *x,
+    float *y,
+    float *width,
+    float *height
+)
+{
+    const float span = UI_BOT_W - 2.0f * UI_ACTION_MARGIN;
+    const float each = count > 0
+        ? (span - (float)(count - 1) * UI_ACTION_GAP) / (float)count
+        : span;
+    *x = UI_ACTION_MARGIN + (float)index * (each + UI_ACTION_GAP);
+    *y = UI_ACTIONS_Y + 6.0f;
+    *width = each;
+    *height = UI_ACTIONS_H - 12.0f;
+}
+
+static void ui_action_bar(const UiModel *model)
+{
+    UiAction actions[UI_ACTIONS_MAX];
+    const size_t count = ui_actions_for(model, actions);
+    if (count == 0) {
+        return;
+    }
+
+    for (size_t index = 0; index < count; index++) {
+        float x = 0.0f;
+        float y = 0.0f;
+        float width = 0.0f;
+        float height = 0.0f;
+        ui_action_rect(index, count, &x, &y, &width, &height);
+
+        const bool pressed = model->touch_down
+            && (float)model->touch_x >= x
+            && (float)model->touch_x < x + width
+            && (float)model->touch_y >= y
+            && (float)model->touch_y < y + height;
+        const bool accented = actions[index].accent != UI_INK_DIM;
+
+        ui_panel_outlined(
+            x,
+            y,
+            width,
+            height,
+            UI_CHAMFER,
+            pressed
+                ? ui_blend(actions[index].accent, 70, UI_BG0)
+                : (accented ? ui_blend(actions[index].accent, 30, UI_BG0) : UI_BG2),
+            ui_alpha(accented ? actions[index].accent : UI_LINE, accented ? 150 : 255)
+        );
+
+        /* Key cap first: the button and the physical key are one thing. */
+        const float cap = 18.0f;
+        const float cap_x = x + 9.0f;
+        const float cap_y = y + (height - cap) / 2.0f;
+        ui_panel(
+            cap_x,
+            cap_y,
+            cap,
+            cap,
+            2.0f,
+            ui_blend(actions[index].accent, 90, UI_BG0)
+        );
+        ui_draw(
+            cap_x + cap / 2.0f,
+            cap_y + 2.0f,
+            UI_SCALE_MICRO,
+            accented ? actions[index].accent : UI_INK,
+            C2D_AlignCenter,
+            actions[index].cap
+        );
+        ui_draw_clipped(
+            cap_x + cap + 7.0f,
+            y + height / 2.0f - 7.0f,
+            width - cap - 24.0f,
+            UI_SCALE_LABEL,
+            accented ? UI_INK : UI_INK_DIM,
+            C2D_AlignLeft,
+            actions[index].label
+        );
+    }
+}
+
+/*
+ * List screens make their rows the targets, so they get one quiet line of key
+ * hints instead of a second row of buttons competing with the list.
+ */
+static void ui_hint_line(float y, const char *text)
+{
+    ui_draw(
+        UI_BOT_W / 2.0f,
+        y,
+        UI_SCALE_MICRO,
+        UI_INK_FAINT,
+        C2D_AlignCenter,
+        text
+    );
 }
 
 static void ui_microphone_glyph(float center_x, float center_y, u32 color)
@@ -1112,14 +1646,34 @@ static void ui_microphone_glyph(float center_x, float center_y, u32 color)
     ui_fill(center_x - 6.0f, center_y + 11.0f, 12.0f, 2.0f, color);
 }
 
+#define UI_HERO_X       12.0f
+#define UI_HERO_W       (UI_BOT_W - 24.0f)
+#define UI_HERO_Y       (UI_CONTENT_Y + 4.0f)
+#define UI_HERO_H       (UI_ACTIONS_Y - UI_CONTENT_Y - 8.0f)
+/* Recording has no competing action, so it takes the action band as well. */
+#define UI_HERO_TALL_H  (UI_BAR_Y - UI_HERO_Y - 6.0f)
+/* Screens with no task rail start their single panel higher. */
+#define UI_SHEET_Y      (UI_STATUS_H + 6.0f)
+#define UI_SHEET_H      (UI_ACTIONS_Y - UI_SHEET_Y - 6.0f)
+
+/*
+ * Push-to-talk is also a touch target, because holding a shoulder button is
+ * awkward one-handed and the stylus hand is already on this screen.
+ */
 static void ui_hero_push_to_talk(const UiModel *model)
 {
-    const float x = 12.0f;
-    const float y = 60.0f;
-    const float width = UI_BOT_W - 24.0f;
-    const float height = 80.0f;
+    const float x = UI_HERO_X;
+    const float y = UI_HERO_Y;
+    const float width = UI_HERO_W;
+    const float height = UI_HERO_H;
     const bool ready = model->microphone_ready;
     const u32 accent = ready ? UI_MINT : UI_INK_FAINT;
+    const bool pressed = ready
+        && model->touch_down
+        && (float)model->touch_x >= x
+        && (float)model->touch_x < x + width
+        && (float)model->touch_y >= y
+        && (float)model->touch_y < y + height;
 
     ui_panel_outlined(
         x,
@@ -1127,40 +1681,40 @@ static void ui_hero_push_to_talk(const UiModel *model)
         width,
         height,
         UI_CHAMFER,
-        UI_BG2,
+        pressed ? ui_blend(accent, 60, UI_BG0) : UI_BG2,
         ui_alpha(accent, ready ? 90 : 50)
     );
-    ui_microphone_glyph(x + 40.0f, y + height / 2.0f, accent);
+    ui_microphone_glyph(x + 38.0f, y + height / 2.0f, accent);
 
     if (ready) {
         ui_draw(
-            x + 78.0f,
-            y + 20.0f,
+            x + 74.0f,
+            y + 14.0f,
             UI_SCALE_HEAD,
             UI_INK,
             C2D_AlignLeft,
             "HOLD  R  TO TALK"
         );
         ui_draw(
-            x + 78.0f,
-            y + 45.0f,
+            x + 74.0f,
+            y + 38.0f,
             UI_SCALE_MICRO,
             UI_INK_DIM,
             C2D_AlignLeft,
-            "release to transcribe and review"
+            "or hold this panel with the stylus"
         );
     } else {
         ui_draw(
-            x + 78.0f,
-            y + 20.0f,
+            x + 74.0f,
+            y + 14.0f,
             UI_SCALE_HEAD,
             UI_INK_DIM,
             C2D_AlignLeft,
             "MIC UNAVAILABLE"
         );
         ui_draw(
-            x + 78.0f,
-            y + 45.0f,
+            x + 74.0f,
+            y + 38.0f,
             UI_SCALE_MICRO,
             UI_INK_FAINT,
             C2D_AlignLeft,
@@ -1171,10 +1725,10 @@ static void ui_hero_push_to_talk(const UiModel *model)
 
 static void ui_hero_recording(const UiModel *model)
 {
-    const float x = 12.0f;
-    const float y = 56.0f;
-    const float width = UI_BOT_W - 24.0f;
-    const float height = 88.0f;
+    const float x = UI_HERO_X;
+    const float y = UI_HERO_Y;
+    const float width = UI_HERO_W;
+    const float height = UI_HERO_TALL_H;
 
     ui_panel_outlined(
         x,
@@ -1191,20 +1745,20 @@ static void ui_hero_recording(const UiModel *model)
             * 2.0f * (float)M_PI);
     ui_dot(
         x + 26.0f,
-        y + 20.0f,
+        y + 24.0f,
         11.0f,
         ui_alpha(UI_ROSE, (u8)(40.0f + 60.0f * pulse))
     );
-    ui_dot(x + 26.0f, y + 20.0f, 6.0f, UI_ROSE);
+    ui_dot(x + 26.0f, y + 24.0f, 6.0f, UI_ROSE);
 
     char elapsed[24];
     char limit[16];
     ui_format_duration(elapsed, sizeof(elapsed), model->record_ms, true);
     ui_format_duration(limit, sizeof(limit), model->record_max_ms, false);
-    ui_draw(x + 46.0f, y + 7.0f, UI_SCALE_HEAD, UI_INK, C2D_AlignLeft, elapsed);
+    ui_draw(x + 46.0f, y + 11.0f, UI_SCALE_HEAD, UI_INK, C2D_AlignLeft, elapsed);
     ui_drawf(
         x + 46.0f + ui_measure(elapsed, UI_SCALE_HEAD) + 8.0f,
-        y + 13.0f,
+        y + 17.0f,
         UI_SCALE_MICRO,
         UI_INK_FAINT,
         C2D_AlignLeft,
@@ -1213,7 +1767,7 @@ static void ui_hero_recording(const UiModel *model)
     );
     ui_draw(
         x + width - 12.0f,
-        y + 7.0f,
+        y + 11.0f,
         UI_SCALE_MICRO,
         UI_ROSE,
         C2D_AlignRight,
@@ -1225,11 +1779,11 @@ static void ui_hero_recording(const UiModel *model)
     const float wave_right = x + width - 12.0f;
     const float pitch = (wave_right - wave_left) / (float)UI_WAVE_BARS;
     const float bar_width = pitch - 3.0f;
-    const float mid_y = y + 48.0f;
+    const float mid_y = y + 62.0f;
     for (unsigned int index = 0; index < UI_WAVE_BARS; index++) {
         const unsigned int slot = (wave_head + index) % UI_WAVE_BARS;
         const float level = (float)wave_levels[slot] / 100.0f;
-        const float bar_height = 2.0f + level * 22.0f;
+        const float bar_height = 2.0f + level * 30.0f;
         const u8 alpha = (u8)(90.0f + level * 150.0f);
         ui_fill(
             wave_left + (float)index * pitch,
@@ -1244,30 +1798,30 @@ static void ui_hero_recording(const UiModel *model)
     const float fraction = model->record_max_ms > 0
         ? (float)model->record_ms / (float)model->record_max_ms
         : 0.0f;
-    ui_fill(wave_left, y + 68.0f, track_w, 2.0f, ui_alpha(UI_LINE, 220));
+    ui_fill(wave_left, y + 92.0f, track_w, 2.0f, ui_alpha(UI_LINE, 220));
     ui_fill(
         wave_left,
-        y + 68.0f,
+        y + 92.0f,
         track_w * (fraction > 1.0f ? 1.0f : fraction),
         2.0f,
         UI_ROSE
     );
     ui_draw(
         x + width / 2.0f,
-        y + 74.0f,
+        y + 99.0f,
         UI_SCALE_MICRO,
         UI_INK_FAINT,
         C2D_AlignCenter,
-        "release R to send for transcription"
+        "release to send for transcription"
     );
 }
 
 static void ui_hero_working(void)
 {
-    const float x = 12.0f;
-    const float y = 60.0f;
-    const float width = UI_BOT_W - 24.0f;
-    const float height = 80.0f;
+    const float x = UI_HERO_X;
+    const float y = UI_HERO_Y;
+    const float width = UI_HERO_W;
+    const float height = UI_HERO_H;
 
     ui_panel_outlined(
         x,
@@ -1278,10 +1832,10 @@ static void ui_hero_working(void)
         UI_BG2,
         ui_alpha(UI_AMBER, 90)
     );
-    ui_spinner(x + 30.0f, y + 30.0f, 9.0f, 2.4f, UI_AMBER);
+    ui_spinner(x + 30.0f, y + 26.0f, 9.0f, 2.4f, UI_AMBER);
     ui_draw(
         x + 54.0f,
-        y + 18.0f,
+        y + 14.0f,
         UI_SCALE_HEAD,
         UI_INK,
         C2D_AlignLeft,
@@ -1289,197 +1843,58 @@ static void ui_hero_working(void)
     );
     ui_draw(
         x + 54.0f,
-        y + 41.0f,
+        y + 36.0f,
         UI_SCALE_MICRO,
         UI_INK_DIM,
         C2D_AlignLeft,
         "responses stream to the top screen"
     );
-    ui_indeterminate_bar(x + 14.0f, y + height - 16.0f, width - 28.0f, UI_AMBER);
+    ui_indeterminate_bar(x + 14.0f, y + height - 12.0f, width - 28.0f, UI_AMBER);
 }
 
-static void ui_hero_transcript(const UiModel *model)
+/*
+ * A decision the user owes an answer to. The buttons live in the action bar,
+ * so this band spends all of its room on what is actually being decided.
+ */
+static void ui_hero_decision(
+    const char *title,
+    u32 accent,
+    const char *body,
+    const char *fallback
+)
 {
-    const float x = 12.0f;
-    const float y = 60.0f;
-    const float width = UI_BOT_W - 24.0f;
-    const float height = 80.0f;
+    const float x = UI_HERO_X;
+    const float y = UI_HERO_Y;
+    const float width = UI_HERO_W;
+    const float height = UI_HERO_H;
 
-    ui_panel_outlined(
-        x,
-        y,
-        width,
-        height,
-        UI_CHAMFER,
-        UI_BG2,
-        ui_alpha(UI_MINT, 110)
-    );
-    ui_draw(
-        x + 16.0f,
-        y + 12.0f,
-        UI_SCALE_LABEL,
-        UI_MINT,
-        C2D_AlignLeft,
-        "REVIEW IT ON THE TOP SCREEN"
-    );
-    ui_draw_clipped(
-        x + 16.0f,
-        y + 32.0f,
-        width - 32.0f,
-        UI_SCALE_MICRO,
-        UI_INK_DIM,
-        C2D_AlignLeft,
-        model->transcript != NULL ? model->transcript : ""
-    );
+    ui_panel_outlined(x, y, width, height, UI_CHAMFER, UI_BG2, ui_alpha(accent, 130));
+    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
 
-    const float button_y = y + 50.0f;
-    const float button_w = (width - 32.0f - 16.0f) / 3.0f;
-    const char *labels[3] = { "A  send", "Y  edit", "B  cancel" };
-    const u32 colors[3] = { UI_MINT, UI_AZURE, UI_INK_DIM };
-    for (int index = 0; index < 3; index++) {
-        const float button_x = x + 16.0f + (float)index * (button_w + 8.0f);
-        ui_panel(
-            button_x,
-            button_y,
-            button_w,
-            18.0f,
-            2.0f,
-            ui_blend(colors[index], 44, UI_BG2)
-        );
-        ui_draw(
-            button_x + button_w / 2.0f,
-            button_y + 3.0f,
-            UI_SCALE_MICRO,
-            colors[index],
-            C2D_AlignCenter,
-            labels[index]
-        );
+    ui_draw(x + 14.0f, y + 8.0f, UI_SCALE_MICRO, accent, C2D_AlignLeft, title);
+
+    const char *text = body != NULL && body[0] != '\0' ? body : fallback;
+    const UiWrapCache *wrapped = ui_wrap(
+        UI_WRAP_SLOT_HERO,
+        text,
+        width - 28.0f,
+        UI_SCALE_BODY
+    );
+    const size_t limit = wrapped->line_count > 3 ? 3 : wrapped->line_count;
+    float line_y = y + 22.0f;
+    for (size_t line = 0; line < limit; line++) {
+        ui_draw_span(x + 14.0f, line_y, UI_SCALE_BODY, UI_INK, text, &wrapped->lines[line]);
+        line_y += UI_BODY_LINE_H;
     }
-}
-
-static void ui_hero_approval(const UiModel *model)
-{
-    const float x = 12.0f;
-    const float y = 56.0f;
-    const float width = UI_BOT_W - 24.0f;
-
-    ui_draw_clipped(
-        x,
-        y,
-        width,
-        UI_SCALE_MICRO,
-        UI_INK_DIM,
-        C2D_AlignLeft,
-        model->approval_summary != NULL && model->approval_summary[0] != '\0'
-            ? model->approval_summary
-            : "The agent needs permission."
-    );
-
-    const float button_y = y + 18.0f;
-    const float button_h = 62.0f;
-    const float button_w = (width - 10.0f) / 2.0f;
-
-    ui_panel_outlined(
-        x,
-        button_y,
-        button_w,
-        button_h,
-        UI_CHAMFER,
-        ui_blend(UI_CORAL, 40, UI_BG0),
-        ui_alpha(UI_CORAL, 170)
-    );
-    ui_draw(
-        x + button_w / 2.0f,
-        button_y + 14.0f,
-        UI_SCALE_WORDMARK,
-        UI_CORAL,
-        C2D_AlignCenter,
-        "X"
-    );
-    ui_draw(
-        x + button_w / 2.0f,
-        button_y + 40.0f,
-        UI_SCALE_MICRO,
-        UI_INK,
-        C2D_AlignCenter,
-        "APPROVE ONCE"
-    );
-
-    const float decline_x = x + button_w + 10.0f;
-    ui_panel_outlined(
-        decline_x,
-        button_y,
-        button_w,
-        button_h,
-        UI_CHAMFER,
-        UI_BG2,
-        ui_alpha(UI_LINE, 255)
-    );
-    ui_draw(
-        decline_x + button_w / 2.0f,
-        button_y + 14.0f,
-        UI_SCALE_WORDMARK,
-        UI_INK_DIM,
-        C2D_AlignCenter,
-        "B"
-    );
-    ui_draw(
-        decline_x + button_w / 2.0f,
-        button_y + 40.0f,
-        UI_SCALE_MICRO,
-        UI_INK_DIM,
-        C2D_AlignCenter,
-        "DECLINE"
-    );
-}
-
-typedef struct {
-    const char *key;
-    const char *label;
-    bool enabled;
-} UiChip;
-
-static void ui_chip(float x, float y, float width, const UiChip *chip)
-{
-    const float cap_width = 22.0f;
-
-    ui_panel_outlined(
-        x,
-        y,
-        cap_width,
-        18.0f,
-        2.0f,
-        chip->enabled ? UI_BG2 : ui_blend(UI_BG2, 130, UI_BG0),
-        chip->enabled ? UI_LINE : ui_blend(UI_LINE, 110, UI_BG0)
-    );
-    ui_draw(
-        x + cap_width / 2.0f,
-        y + 2.0f,
-        UI_SCALE_MICRO,
-        chip->enabled ? UI_INK : ui_alpha(UI_INK_FAINT, 150),
-        C2D_AlignCenter,
-        chip->key
-    );
-    ui_draw_clipped(
-        x + cap_width + 6.0f,
-        y + 2.0f,
-        width - cap_width - 6.0f,
-        UI_SCALE_MICRO,
-        chip->enabled ? UI_INK_DIM : ui_alpha(UI_INK_FAINT, 150),
-        C2D_AlignLeft,
-        chip->label
-    );
-}
-
-static void ui_chip_grid(const UiChip *chips, size_t count)
-{
-    const float margin = 10.0f;
-    const float gap = 6.0f;
-    const float width = (UI_BOT_W - 2.0f * margin - 2.0f * gap) / 3.0f;
-    for (size_t index = 0; index < count && index < 6; index++) {
-        const float x = margin + (float)(index % 3) * (width + gap);
-        const float y = UI_CHIPS_Y + 8.0f + (float)(index / 3) * 24.0f;
-        ui_chip(x, y, width, &chips[index]);
+    if (wrapped->line_count > limit) {
+        ui_draw(
+            x + 14.0f,
+            y + height - 13.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignLeft,
+            "full request on the top screen"
+        );
     }
 }
 
@@ -1538,51 +1953,38 @@ static void ui_bottom_bar(const UiModel *model)
 
 static void ui_render_bottom_main(const UiModel *model)
 {
-    ui_fill(0.0f, UI_HERO_Y, UI_BOT_W, UI_BAR_Y - UI_HERO_Y, UI_BG0);
+    ui_fill(0.0f, UI_CONTENT_Y, UI_BOT_W, UI_BAR_Y - UI_CONTENT_Y, UI_BG0);
+    ui_task_rail(model);
     /* A pending approval is waiting on the user, not on progress. */
     ui_bottom_status(
         model,
+        UI_RAIL_H,
         model->recording || (model->turn_active && !model->approval_pending)
     );
 
     if (model->recording) {
         ui_hero_recording(model);
     } else if (model->approval_pending) {
-        ui_hero_approval(model);
+        ui_hero_decision(
+            "APPROVAL REQUIRED",
+            UI_CORAL,
+            model->approval_summary,
+            "The agent is asking for permission to continue."
+        );
     } else if (model->transcript_ready) {
-        ui_hero_transcript(model);
+        ui_hero_decision(
+            "SEND THIS TO THE AGENT?",
+            UI_MINT,
+            model->transcript,
+            "The transcript came back empty."
+        );
     } else if (model->turn_active) {
         ui_hero_working();
     } else {
         ui_hero_push_to_talk(model);
     }
 
-    const bool free_to_act =
-        !model->recording && !model->turn_active && !model->transcript_ready;
-    const UiChip chips[6] = {
-        {
-            "A",
-            model->transcript_ready ? "Send" : "Type",
-            model->transcript_ready || (free_to_act && !model->approval_pending),
-        },
-        {
-            "X",
-            model->approval_pending ? "Approve" : "Ask demo",
-            model->approval_pending || free_to_act,
-        },
-        {
-            "B",
-            model->transcript_ready
-                ? "Cancel"
-                : (model->approval_pending ? "Decline" : "Interrupt"),
-            model->transcript_ready || model->approval_pending
-                || model->turn_active,
-        },
-        { "L", "Photo", free_to_act && !model->approval_pending },
-        { "UD", "Scroll", true },
-        { "ST", "Home", true },
-    };
-    ui_chip_grid(chips, 6);
+    ui_action_bar(model);
     ui_bottom_bar(model);
 }
 
@@ -1617,7 +2019,7 @@ static void ui_render_top_boot(const UiModel *model)
 static void ui_render_bottom_boot(const UiModel *model)
 {
     ui_fill(0.0f, 0.0f, UI_BOT_W, UI_SCREEN_H, UI_BG0);
-    ui_spinner(UI_BOT_W / 2.0f, 92.0f, 12.0f, 3.0f, UI_AZURE);
+    ui_spinner(UI_BOT_W / 2.0f, 96.0f, 12.0f, 3.0f, UI_AZURE);
     ui_draw_clipped(
         UI_BOT_W / 2.0f,
         118.0f,
@@ -1750,73 +2152,102 @@ static void ui_render_top_home(const UiModel *model)
     );
 }
 
+/* ------------------------------------------------------------ list rows -- */
+
+#define UI_ROW_H       27.0f
+#define UI_ROW_X       10.0f
+#define UI_ROW_W       (UI_BOT_W - 2.0f * UI_ROW_X)
+#define UI_ROW_TOP     (UI_STATUS_H + 4.0f)
+#define UI_ROW_MAX     5u
+
+/*
+ * List rows are the touch targets on the screens that have them, which is why
+ * those screens get a single hint line rather than a second bank of buttons:
+ * the thing to press is already the thing you are reading.
+ */
+static void ui_list_row(
+    const UiModel *model,
+    size_t index,
+    const char *label,
+    const char *hint,
+    bool selected,
+    bool enabled,
+    u32 accent
+)
+{
+    const float y = UI_ROW_TOP + (float)index * UI_ROW_H;
+    const bool pressed = enabled
+        && model->touch_down
+        && (float)model->touch_y >= y
+        && (float)model->touch_y < y + UI_ROW_H - 2.0f
+        && (float)model->touch_x >= UI_ROW_X
+        && (float)model->touch_x < UI_ROW_X + UI_ROW_W;
+    const u32 ink = !enabled
+        ? ui_alpha(UI_INK_FAINT, 150)
+        : (selected ? UI_INK : UI_INK_DIM);
+
+    /* The panel has to clear both text lines, or it crops the hint. */
+    if (selected || pressed) {
+        ui_panel_outlined(
+            UI_ROW_X,
+            y,
+            UI_ROW_W,
+            UI_ROW_H - 2.0f,
+            2.0f,
+            ui_blend(accent, pressed ? 60 : (enabled ? 34 : 14), UI_BG0),
+            ui_alpha(accent, enabled ? 150 : 60)
+        );
+    }
+    ui_fill(
+        UI_ROW_X + 3.0f,
+        y + 3.0f,
+        2.0f,
+        UI_ROW_H - 8.0f,
+        selected || pressed ? accent : UI_LINE
+    );
+    ui_draw_clipped(
+        UI_ROW_X + 13.0f,
+        y + 1.0f,
+        UI_ROW_W - 26.0f,
+        UI_SCALE_LABEL,
+        ink,
+        C2D_AlignLeft,
+        label
+    );
+    if (hint != NULL && hint[0] != '\0') {
+        ui_draw_clipped(
+            UI_ROW_X + 13.0f,
+            y + 13.0f,
+            UI_ROW_W - 26.0f,
+            UI_SCALE_MICRO,
+            ui_alpha(UI_INK_FAINT, enabled ? 220 : 130),
+            C2D_AlignLeft,
+            hint
+        );
+    }
+}
+
 static void ui_render_bottom_home(const UiModel *model)
 {
     ui_fill(0.0f, 0.0f, UI_BOT_W, UI_SCREEN_H, UI_BG0);
-    ui_bottom_status(model, false);
+    ui_bottom_status(model, 0.0f, false);
 
-    /*
-     * The menu is the action surface here, so it takes the whole band between
-     * the status header and the bar. There is no chip grid: every row already
-     * carries its own explanation, and five rows plus chips do not fit.
-     */
-    const float row_height = 27.0f;
-    const float x = 10.0f;
-    const float width = UI_BOT_W - 2.0f * x;
-    float y = UI_STATUS_H + 4.0f;
-
-    for (size_t index = 0; index < model->menu_count && index < 5; index++) {
-        const bool selected = index == model->menu_selected;
-        const bool enabled = model->menu_enabled == NULL
-            || model->menu_enabled[index];
-        const u32 ink = !enabled
-            ? ui_alpha(UI_INK_FAINT, 150)
-            : (selected ? UI_INK : UI_INK_DIM);
-
-        /* The panel has to clear both text lines, or it crops the hint. */
-        if (selected) {
-            ui_panel_outlined(
-                x,
-                y,
-                width,
-                row_height - 2.0f,
-                2.0f,
-                ui_blend(UI_AZURE, enabled ? 34 : 14, UI_BG0),
-                ui_alpha(UI_AZURE, enabled ? 150 : 60)
-            );
-        }
-        ui_fill(x + 3.0f, y + 3.0f, 2.0f, row_height - 8.0f, selected ? UI_AZURE : UI_LINE);
-        ui_draw_clipped(
-            x + 13.0f,
-            y + 1.0f,
-            width - 26.0f,
-            UI_SCALE_LABEL,
-            ink,
-            C2D_AlignLeft,
-            model->menu_labels[index]
+    for (size_t index = 0;
+         index < model->menu_count && index < UI_ROW_MAX;
+         index++) {
+        ui_list_row(
+            model,
+            index,
+            model->menu_labels[index],
+            model->menu_hints != NULL ? model->menu_hints[index] : NULL,
+            index == model->menu_selected,
+            model->menu_enabled == NULL || model->menu_enabled[index],
+            UI_AZURE
         );
-        if (model->menu_hints != NULL) {
-            ui_draw_clipped(
-                x + 13.0f,
-                y + 13.0f,
-                width - 26.0f,
-                UI_SCALE_MICRO,
-                ui_alpha(UI_INK_FAINT, enabled ? 220 : 130),
-                C2D_AlignLeft,
-                model->menu_hints[index]
-            );
-        }
-        y += row_height;
     }
 
-    ui_draw(
-        UI_BOT_W / 2.0f,
-        UI_BAR_Y - 13.0f,
-        UI_SCALE_MICRO,
-        UI_INK_FAINT,
-        C2D_AlignCenter,
-        "Up/Down choose      A select      START exit"
-    );
+    /* START is worth naming here and nowhere else: this is the only way out. */
+    ui_hint_line(UI_BAR_Y - 13.0f, "Up/Down choose      A select      START exit");
     ui_bottom_bar(model);
 }
 
@@ -1890,17 +2321,35 @@ static void ui_render_top_pairing(const UiModel *model)
          * other screen has a header there. This one is full-bleed camera, so
          * the same scrim has to cover the top strip too.
          */
+        /*
+         * `ui_attention_card` dims from the header band down to the footer,
+         * because every other screen has chrome there. This one is full-bleed
+         * camera, so both strips have to be dimmed as well or the viewfinder
+         * shows through undimmed above and below the card.
+         */
         ui_fill(0.0f, 0.0f, UI_TOP_W, UI_HEADER_H, ui_alpha(UI_BG0, 236));
+        ui_fill(
+            0.0f,
+            UI_FOOTER_Y,
+            UI_TOP_W,
+            UI_SCREEN_H - UI_FOOTER_Y,
+            ui_alpha(UI_BG0, 236)
+        );
+        /*
+         * No key hint here. The bottom screen carries the live actions for this
+         * phase, and a second, differently worded list on the top screen is how
+         * the two end up disagreeing.
+         */
         ui_attention_card(
             title,
             accent,
             model->pairing_message != NULL ? model->pairing_message : "",
-            model->pairing_phase == UI_PAIRING_FAILED
-                ? "A  scan again        Y  type the code        B  back"
-                : "B  cancel"
+            ""
         );
+        return;
     }
 
+    /* Aiming only: the scrim explains the viewfinder it is drawn over. */
     ui_fill_vertical(
         0.0f,
         UI_SCREEN_H - 34.0f,
@@ -1916,36 +2365,33 @@ static void ui_render_top_pairing(const UiModel *model)
         UI_SCALE_MICRO,
         UI_INK,
         C2D_AlignLeft,
-        model->pairing_phase == UI_PAIRING_AIMING
-            ? "Fill the brackets with the QR code on your computer"
-            : (model->pairing_message != NULL ? model->pairing_message : "")
+        "Fill the brackets with the QR code on your computer"
     );
-    if (model->pairing_phase == UI_PAIRING_AIMING) {
-        ui_drawf(
-            UI_TOP_W - UI_PAD,
-            UI_SCREEN_H - 20.0f,
-            UI_SCALE_MICRO,
-            UI_INK_FAINT,
-            C2D_AlignRight,
-            "%u looks",
-            model->pairing_frames_examined
-        );
-    }
+    ui_drawf(
+        UI_TOP_W - UI_PAD,
+        UI_SCREEN_H - 20.0f,
+        UI_SCALE_MICRO,
+        UI_INK_FAINT,
+        C2D_AlignRight,
+        "%u looks",
+        model->pairing_frames_examined
+    );
 }
 
 static void ui_render_bottom_pairing(const UiModel *model)
 {
-    ui_fill(0.0f, UI_HERO_Y, UI_BOT_W, UI_BAR_Y - UI_HERO_Y, UI_BG0);
+    ui_fill(0.0f, UI_STATUS_H, UI_BOT_W, UI_BAR_Y - UI_STATUS_H, UI_BG0);
     ui_bottom_status(
         model,
+        0.0f,
         model->pairing_phase == UI_PAIRING_EXCHANGING
             || model->pairing_phase == UI_PAIRING_DECODED
     );
 
-    const float x = 12.0f;
-    const float y = 62.0f;
-    const float width = UI_BOT_W - 24.0f;
-    const float height = 74.0f;
+    const float x = UI_HERO_X;
+    const float y = UI_SHEET_Y;
+    const float width = UI_HERO_W;
+    const float height = UI_SHEET_H;
     const u32 accent = model->pairing_phase == UI_PAIRING_FAILED
         ? UI_ROSE
         : (model->pairing_phase == UI_PAIRING_SUCCEEDED ? UI_MINT : UI_AZURE);
@@ -1953,38 +2399,38 @@ static void ui_render_bottom_pairing(const UiModel *model)
     ui_panel_outlined(x, y, width, height, UI_CHAMFER, UI_BG2, ui_alpha(accent, 110));
 
     if (model->pairing_phase == UI_PAIRING_SUCCEEDED) {
-        ui_draw(x + 16.0f, y + 12.0f, UI_SCALE_LABEL, UI_MINT, C2D_AlignLeft, "Paired");
+        ui_draw(x + 16.0f, y + 14.0f, UI_SCALE_HEAD, UI_MINT, C2D_AlignLeft, "Paired");
         ui_draw_clipped(
             x + 16.0f,
-            y + 34.0f,
+            y + 40.0f,
             width - 32.0f,
-            UI_SCALE_MICRO,
-            UI_INK_DIM,
+            UI_SCALE_BODY,
+            UI_INK,
             C2D_AlignLeft,
             model->pairing_bridge != NULL ? model->pairing_bridge : ""
         );
         ui_draw(
             x + 16.0f,
-            y + 52.0f,
+            y + 62.0f,
             UI_SCALE_MICRO,
             UI_INK_FAINT,
             C2D_AlignLeft,
-            "A  continue to this machine"
+            "The device key is saved on the SD card"
         );
     } else if (model->pairing_phase == UI_PAIRING_FAILED) {
-        ui_draw(x + 16.0f, y + 12.0f, UI_SCALE_LABEL, UI_ROSE, C2D_AlignLeft, "Not paired");
+        ui_draw(x + 16.0f, y + 14.0f, UI_SCALE_HEAD, UI_ROSE, C2D_AlignLeft, "Not paired");
         ui_draw_clipped(
             x + 16.0f,
-            y + 34.0f,
+            y + 40.0f,
             width - 32.0f,
-            UI_SCALE_MICRO,
-            UI_INK_DIM,
+            UI_SCALE_BODY,
+            UI_INK,
             C2D_AlignLeft,
             model->pairing_message != NULL ? model->pairing_message : ""
         );
         ui_draw(
             x + 16.0f,
-            y + 52.0f,
+            y + 62.0f,
             UI_SCALE_MICRO,
             UI_INK_FAINT,
             C2D_AlignLeft,
@@ -1993,35 +2439,35 @@ static void ui_render_bottom_pairing(const UiModel *model)
     } else if (model->pairing_phase == UI_PAIRING_AIMING) {
         ui_draw(
             x + 16.0f,
-            y + 12.0f,
-            UI_SCALE_LABEL,
+            y + 14.0f,
+            UI_SCALE_HEAD,
             UI_INK,
             C2D_AlignLeft,
             "Looking for a QR code"
         );
         ui_draw(
             x + 16.0f,
-            y + 34.0f,
+            y + 40.0f,
             UI_SCALE_MICRO,
             UI_INK_DIM,
             C2D_AlignLeft,
             "Hold the handheld steady, about 20 cm away"
         );
-        ui_indeterminate_bar(x + 16.0f, y + height - 18.0f, width - 32.0f, UI_AZURE);
+        ui_indeterminate_bar(x + 16.0f, y + height - 20.0f, width - 32.0f, UI_AZURE);
     } else {
-        ui_spinner(x + 32.0f, y + 30.0f, 9.0f, 2.4f, UI_AZURE);
+        ui_spinner(x + 34.0f, y + 36.0f, 9.0f, 2.4f, UI_AZURE);
         ui_draw(
-            x + 56.0f,
-            y + 20.0f,
-            UI_SCALE_LABEL,
+            x + 58.0f,
+            y + 24.0f,
+            UI_SCALE_HEAD,
             UI_INK,
             C2D_AlignLeft,
             "Exchanging the code"
         );
         ui_draw_clipped(
-            x + 56.0f,
-            y + 42.0f,
-            width - 72.0f,
+            x + 58.0f,
+            y + 48.0f,
+            width - 74.0f,
             UI_SCALE_MICRO,
             UI_INK_DIM,
             C2D_AlignLeft,
@@ -2029,57 +2475,67 @@ static void ui_render_bottom_pairing(const UiModel *model)
         );
     }
 
-    const bool failed = model->pairing_phase == UI_PAIRING_FAILED;
-    const bool done = model->pairing_phase == UI_PAIRING_SUCCEEDED;
-    const UiChip chips[3] = {
-        { "A", done ? "Continue" : "Rescan", done || failed },
-        { "Y", "Type code", !done },
-        { "B", done ? "Home" : "Cancel", true },
-    };
-    ui_chip_grid(chips, 3);
+    ui_action_bar(model);
     ui_bottom_bar(model);
 }
 
 /* ---------------------------------------------------------- task chooser -- */
 
+/*
+ * The manager puts the list on the bottom screen because that is the screen a
+ * finger can reach, and spends the top screen on the one task the user is
+ * currently pointing at. Two screens, two jobs.
+ */
+#define UI_TASK_ROWS_MAX 4u
+
+static size_t ui_task_list_first(const UiModel *model, size_t *visible)
+{
+    const size_t shown = model->task_count < UI_TASK_ROWS_MAX
+        ? model->task_count
+        : UI_TASK_ROWS_MAX;
+    *visible = shown;
+    if (model->task_count <= UI_TASK_ROWS_MAX) {
+        return 0;
+    }
+    size_t first = 0;
+    if (model->task_selected >= UI_TASK_ROWS_MAX) {
+        first = model->task_selected - UI_TASK_ROWS_MAX + 1;
+    }
+    if (first + UI_TASK_ROWS_MAX > model->task_count) {
+        first = model->task_count - UI_TASK_ROWS_MAX;
+    }
+    return first;
+}
+
 static void ui_render_top_sessions(const UiModel *model)
 {
     ui_fill(0.0f, UI_HEADER_H, UI_TOP_W, UI_SCREEN_H - UI_HEADER_H, UI_BG0);
-    ui_top_header(model, "choose a coding-agent task");
+    ui_top_header(model, "tasks on this machine");
 
-    ui_draw(
-        UI_PAD,
-        UI_HEADER_H + 8.0f,
-        UI_SCALE_MICRO,
-        UI_INK_FAINT,
-        C2D_AlignLeft,
-        "RECENT TASKS"
-    );
-
-    if (model->session_count == 0) {
+    if (model->task_count == 0) {
         const char *headline = "No recent tasks were returned";
-        const char *hint = "X starts a new task in the bridge workspace";
-        if (model->sessions_loading) {
+        const char *hint = "Start a new one to give the agent something to do";
+        if (model->tasks_loading) {
             headline = "Looking for recent tasks...";
             hint = "";
-        } else if (model->sessions_retryable) {
+        } else if (model->tasks_retryable) {
             headline = "The bridge did not answer";
-            hint = "Check that it is running, then retry with A or X";
+            hint = "Check that it is running, then retry with A";
         }
-        if (model->sessions_loading) {
-            ui_spinner(UI_TOP_W / 2.0f, 96.0f, 9.0f, 2.4f, UI_AZURE);
+        if (model->tasks_loading) {
+            ui_spinner(UI_TOP_W / 2.0f, 100.0f, 9.0f, 2.4f, UI_AZURE);
         }
         ui_draw(
             UI_TOP_W / 2.0f,
-            120.0f,
+            124.0f,
             UI_SCALE_BODY,
-            model->sessions_retryable ? UI_ROSE : UI_INK_FAINT,
+            model->tasks_retryable ? UI_ROSE : UI_INK_FAINT,
             C2D_AlignCenter,
             headline
         );
         ui_draw(
             UI_TOP_W / 2.0f,
-            142.0f,
+            146.0f,
             UI_SCALE_MICRO,
             ui_alpha(UI_INK_FAINT, 190),
             C2D_AlignCenter,
@@ -2088,133 +2544,200 @@ static void ui_render_top_sessions(const UiModel *model)
         return;
     }
 
-    const float row_height = 26.0f;
-    float y = UI_HEADER_H + 26.0f;
-    for (size_t index = 0; index < model->session_count; index++) {
-        const bool selected = index == model->session_selected;
-        if (selected) {
-            ui_panel(
-                UI_PAD - 4.0f,
-                y,
-                UI_TOP_W - 2.0f * UI_PAD + 8.0f,
-                row_height - 3.0f,
-                2.0f,
-                UI_BG2
-            );
-            ui_fill(UI_PAD - 4.0f, y, 3.0f, row_height - 3.0f, UI_AZURE);
+    /* One line of arithmetic the user would otherwise do by eye. */
+    unsigned int waiting = 0;
+    unsigned int working = 0;
+    for (size_t index = 0; index < model->task_count; index++) {
+        if (model->tasks[index].state == UI_TASK_ATTENTION) {
+            waiting++;
+        } else if (model->tasks[index].state == UI_TASK_WORKING) {
+            working++;
         }
+    }
+    ui_drawf(
+        UI_PAD,
+        UI_HEADER_H + 8.0f,
+        UI_SCALE_MICRO,
+        UI_INK_FAINT,
+        C2D_AlignLeft,
+        "%u TASK%s",
+        (unsigned int)model->task_count,
+        model->task_count == 1 ? "" : "S"
+    );
+    if (waiting > 0) {
         ui_drawf(
-            UI_PAD + 8.0f,
-            y + 4.0f,
+            UI_TOP_W - UI_PAD,
+            UI_HEADER_H + 8.0f,
             UI_SCALE_MICRO,
-            selected ? UI_AZURE : UI_INK_FAINT,
-            C2D_AlignLeft,
-            "%u",
-            (unsigned int)(index + 1)
+            UI_CORAL,
+            C2D_AlignRight,
+            "%u waiting on you",
+            waiting
         );
-        ui_draw_clipped(
-            UI_PAD + 24.0f,
-            y + 3.0f,
-            UI_TOP_W - 2.0f * UI_PAD - 28.0f,
+    } else if (working > 0) {
+        ui_drawf(
+            UI_TOP_W - UI_PAD,
+            UI_HEADER_H + 8.0f,
+            UI_SCALE_MICRO,
+            UI_AMBER,
+            C2D_AlignRight,
+            "%u working",
+            working
+        );
+    }
+
+    const size_t selected = model->task_selected < model->task_count
+        ? model->task_selected
+        : 0;
+    const UiTask *task = &model->tasks[selected];
+    const u32 accent = ui_task_accent(task->state);
+
+    const float x = 24.0f;
+    const float y = UI_HEADER_H + 26.0f;
+    const float width = UI_TOP_W - 2.0f * x;
+    const float height = 108.0f;
+
+    ui_panel_outlined(x, y, width, height, UI_CHAMFER, UI_BG2, ui_alpha(accent, 120));
+    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
+
+    ui_drawf(
+        x + 16.0f,
+        y + 12.0f,
+        UI_SCALE_MICRO,
+        UI_INK_FAINT,
+        C2D_AlignLeft,
+        "TASK %u OF %u",
+        (unsigned int)(selected + 1),
+        (unsigned int)model->task_count
+    );
+    const UiAgentBadge badge = {
+        ui_task_state_word(task->state),
+        accent,
+        task->state == UI_TASK_WORKING,
+    };
+    ui_badge(x + width - 14.0f, y + 9.0f, &badge);
+
+    const UiWrapCache *wrapped = ui_wrap(
+        UI_WRAP_SLOT_CARD,
+        task->label != NULL ? task->label : "",
+        width - 32.0f,
+        UI_SCALE_BODY
+    );
+    const size_t limit = wrapped->line_count > 3 ? 3 : wrapped->line_count;
+    float line_y = y + 34.0f;
+    for (size_t line = 0; line < limit; line++) {
+        ui_draw_span(
+            x + 16.0f,
+            line_y,
             UI_SCALE_BODY,
-            selected ? UI_INK : UI_INK_DIM,
-            C2D_AlignLeft,
-            model->session_labels[index]
+            UI_INK,
+            task->label,
+            &wrapped->lines[line]
         );
-        y += row_height;
+        line_y += UI_BODY_LINE_H;
+    }
+
+    const char *note = "Ready for a new prompt";
+    if (task->state == UI_TASK_ATTENTION) {
+        note = "Blocked: this task is waiting for your approval";
+    } else if (task->state == UI_TASK_WORKING) {
+        note = "The agent is working on this one right now";
+    } else if (task->state == UI_TASK_FAILED) {
+        note = "The last turn ended in an error";
+    } else if (task->unread) {
+        note = "New output arrived while you were elsewhere";
+    }
+    ui_fill(x + 16.0f, y + height - 34.0f, width - 32.0f, 1.0f, ui_alpha(UI_LINE, 220));
+    ui_draw_clipped(
+        x + 16.0f,
+        y + height - 26.0f,
+        width - 32.0f,
+        UI_SCALE_MICRO,
+        task->state == UI_TASK_ATTENTION ? UI_CORAL : UI_INK_DIM,
+        C2D_AlignLeft,
+        note
+    );
+    if (model->task_active_valid && selected == model->task_active) {
+        ui_draw(
+            x + 16.0f,
+            y + height - 15.0f,
+            UI_SCALE_MICRO,
+            ui_alpha(UI_INK_FAINT, 210),
+            C2D_AlignLeft,
+            "This is the task you are already reading"
+        );
     }
 }
 
 static void ui_render_bottom_sessions(const UiModel *model)
 {
-    ui_fill(0.0f, UI_HERO_Y, UI_BOT_W, UI_BAR_Y - UI_HERO_Y, UI_BG0);
-    ui_bottom_status(model, model->sessions_loading);
+    ui_fill(0.0f, UI_STATUS_H, UI_BOT_W, UI_BAR_Y - UI_STATUS_H, UI_BG0);
+    ui_bottom_status(model, 0.0f, model->tasks_loading);
 
-    const float x = 12.0f;
-    const float y = 62.0f;
-    const float width = UI_BOT_W - 24.0f;
-    const float button_h = 34.0f;
+    size_t visible = 0;
+    const size_t first = ui_task_list_first(model, &visible);
 
-    if (model->sessions_retryable) {
-        ui_panel_outlined(
-            x,
-            y,
-            width,
-            button_h + 8.0f + button_h,
-            UI_CHAMFER,
-            UI_BG2,
-            ui_alpha(UI_ROSE, 110)
+    for (size_t slot = 0; slot < visible; slot++) {
+        const size_t index = first + slot;
+        const UiTask *task = &model->tasks[index];
+        char hint[64];
+        snprintf(
+            hint,
+            sizeof(hint),
+            "%s%s%s",
+            ui_task_state_word(task->state),
+            model->task_active_valid && index == model->task_active
+                ? "  ·  open"
+                : "",
+            task->unread ? "  ·  new output" : ""
         );
-        ui_draw(
-            x + 14.0f,
-            y + 12.0f,
-            UI_SCALE_LABEL,
-            UI_ROSE,
-            C2D_AlignLeft,
-            "Could not reach the bridge"
-        );
-        ui_draw(
-            x + 14.0f,
-            y + 38.0f,
-            UI_SCALE_MICRO,
-            UI_INK_DIM,
-            C2D_AlignLeft,
-            "A or X retries task discovery"
-        );
-    } else {
-        const bool can_resume = model->session_count > 0;
-        ui_panel_outlined(
-            x,
-            y,
-            width,
-            button_h,
-            UI_CHAMFER,
-            can_resume ? ui_blend(UI_AZURE, 34, UI_BG0) : UI_BG2,
-            can_resume ? ui_alpha(UI_AZURE, 150) : UI_LINE
-        );
-        ui_draw(
-            x + 14.0f,
-            y + 8.0f,
-            UI_SCALE_LABEL,
-            can_resume ? UI_INK : UI_INK_FAINT,
-            C2D_AlignLeft,
-            "A   Resume selected task"
-        );
-
-        ui_panel_outlined(
-            x,
-            y + button_h + 8.0f,
-            width,
-            button_h,
-            UI_CHAMFER,
-            UI_BG2,
-            ui_alpha(UI_LINE, 255)
-        );
-        ui_draw(
-            x + 14.0f,
-            y + button_h + 16.0f,
-            UI_SCALE_LABEL,
-            UI_INK,
-            C2D_AlignLeft,
-            "X   Start a new task"
+        ui_list_row(
+            model,
+            slot,
+            task->label != NULL ? task->label : "task",
+            hint,
+            index == model->task_selected,
+            true,
+            ui_task_accent(task->state)
         );
     }
 
-    const UiChip chips[3] = {
-        { "UD", "Choose", !model->sessions_retryable && model->session_count > 1 },
-        { "A", model->sessions_retryable ? "Retry" : "Resume", true },
-        { "ST", "Back", true },
-    };
-    ui_chip_grid(chips, 3);
+    /*
+     * A row rather than a button, so starting a task is reachable the same way
+     * as opening one. X remains the shortcut for anyone using the keys. It is
+     * absent while the bridge is unreachable: starting a task would fail the
+     * same way listing them just did, and retrying is the only useful move.
+     */
+    if (!model->tasks_retryable) {
+        ui_list_row(
+            model,
+            visible,
+            "+  Start a new task",
+            "X   fresh Codex task in the bridge workspace",
+            false,
+            !model->tasks_loading,
+            UI_VIOLET
+        );
+    }
 
-    ui_draw_clipped(
-        12.0f,
-        UI_CHIPS_Y + 34.0f,
-        UI_BOT_W - 24.0f,
-        UI_SCALE_MICRO,
-        UI_INK_FAINT,
-        C2D_AlignLeft,
-        model->sessions_status != NULL ? model->sessions_status : ""
+    /* Shares the hint line's row: the hint is centred, this is flush right. */
+    if (model->task_count > visible) {
+        ui_drawf(
+            UI_BOT_W - 12.0f,
+            UI_BAR_Y - 13.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignRight,
+            "+%u more",
+            (unsigned int)(model->task_count - visible)
+        );
+    }
+
+    ui_hint_line(
+        UI_BAR_Y - 13.0f,
+        model->tasks_retryable
+            ? "A retries      B back to the start screen"
+            : "Up/Down choose      A open      B back"
     );
     ui_bottom_bar(model);
 }
@@ -2258,38 +2781,41 @@ static void ui_render_top_photo(const UiModel *model)
 
 static void ui_render_bottom_photo(const UiModel *model)
 {
-    ui_fill(0.0f, UI_HERO_Y, UI_BOT_W, UI_BAR_Y - UI_HERO_Y, UI_BG0);
+    ui_fill(0.0f, UI_STATUS_H, UI_BOT_W, UI_BAR_Y - UI_STATUS_H, UI_BG0);
     ui_bottom_status(
         model,
+        0.0f,
         model->photo_progress_percent != UI_PHOTO_PROGRESS_NONE
     );
 
-    const float x = 12.0f;
-    const float y = 62.0f;
-    const float width = UI_BOT_W - 24.0f;
+    const float x = UI_HERO_X;
+    const float y = UI_SHEET_Y;
+    const float width = UI_HERO_W;
+    const float height = UI_SHEET_H;
 
     if (model->photo_progress_percent != UI_PHOTO_PROGRESS_NONE) {
         ui_panel_outlined(
             x,
             y,
             width,
-            60.0f,
+            height,
             UI_CHAMFER,
             UI_BG2,
             ui_alpha(UI_AZURE, 90)
         );
+        /* The status band already names the operation; this says how far it is. */
         ui_draw(
             x + 16.0f,
-            y + 12.0f,
-            UI_SCALE_LABEL,
+            y + 22.0f,
+            UI_SCALE_HEAD,
             UI_INK,
             C2D_AlignLeft,
-            "Uploading photo"
+            "Sending to the bridge"
         );
         ui_drawf(
             x + width - 16.0f,
-            y + 12.0f,
-            UI_SCALE_LABEL,
+            y + 22.0f,
+            UI_SCALE_HEAD,
             UI_AZURE,
             C2D_AlignRight,
             "%u%%",
@@ -2297,78 +2823,59 @@ static void ui_render_bottom_photo(const UiModel *model)
         );
         const float track_x = x + 16.0f;
         const float track_w = width - 32.0f;
-        ui_fill(track_x, y + 38.0f, track_w, 3.0f, ui_alpha(UI_LINE, 220));
+        ui_fill(track_x, y + 52.0f, track_w, 3.0f, ui_alpha(UI_LINE, 220));
         ui_fill(
             track_x,
-            y + 38.0f,
+            y + 52.0f,
             track_w * (float)model->photo_progress_percent / 100.0f,
             3.0f,
             UI_AZURE
         );
+        ui_draw(
+            x + 16.0f,
+            y + 66.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignLeft,
+            "192 000 bytes over the shared media link"
+        );
     } else {
-        const float button_w = (width - 10.0f) / 2.0f;
         ui_panel_outlined(
             x,
             y,
-            button_w,
-            60.0f,
-            UI_CHAMFER,
-            ui_blend(UI_MINT, 36, UI_BG0),
-            ui_alpha(UI_MINT, 155)
-        );
-        ui_draw(
-            x + button_w / 2.0f,
-            y + 12.0f,
-            UI_SCALE_WORDMARK,
-            UI_MINT,
-            C2D_AlignCenter,
-            "A"
-        );
-        ui_draw(
-            x + button_w / 2.0f,
-            y + 38.0f,
-            UI_SCALE_MICRO,
-            UI_INK,
-            C2D_AlignCenter,
-            "ATTACH"
-        );
-
-        const float cancel_x = x + button_w + 10.0f;
-        ui_panel_outlined(
-            cancel_x,
-            y,
-            button_w,
-            60.0f,
+            width,
+            height,
             UI_CHAMFER,
             UI_BG2,
-            ui_alpha(UI_LINE, 255)
+            ui_alpha(UI_AZURE, 90)
         );
         ui_draw(
-            cancel_x + button_w / 2.0f,
-            y + 12.0f,
-            UI_SCALE_WORDMARK,
-            UI_INK_DIM,
-            C2D_AlignCenter,
-            "B"
+            x + 16.0f,
+            y + 18.0f,
+            UI_SCALE_HEAD,
+            UI_INK,
+            C2D_AlignLeft,
+            "Attach this shot?"
         );
         ui_draw(
-            cancel_x + button_w / 2.0f,
-            y + 38.0f,
+            x + 16.0f,
+            y + 44.0f,
             UI_SCALE_MICRO,
             UI_INK_DIM,
-            C2D_AlignCenter,
-            "DISCARD"
+            C2D_AlignLeft,
+            "It rides along with your next prompt, then is consumed."
+        );
+        ui_draw(
+            x + 16.0f,
+            y + 60.0f,
+            UI_SCALE_MICRO,
+            ui_alpha(UI_INK_FAINT, 220),
+            C2D_AlignLeft,
+            "Only one photo is held per task."
         );
     }
 
-    ui_draw(
-        UI_BOT_W / 2.0f,
-        UI_CHIPS_Y + 12.0f,
-        UI_SCALE_MICRO,
-        UI_INK_FAINT,
-        C2D_AlignCenter,
-        "an attached photo is consumed by the next prompt"
-    );
+    ui_action_bar(model);
     ui_bottom_bar(model);
 }
 
@@ -2544,6 +3051,162 @@ size_t ui_max_scroll(const UiModel *model)
         return 0;
     }
     return wrapped->line_count - visible_lines;
+}
+
+size_t ui_page_lines(const UiModel *model)
+{
+    float text_top = 0.0f;
+    size_t visible_lines = 0;
+    ui_body_layout(model, &text_top, &visible_lines);
+    /* Keep one line of overlap so a paged jump has something to read back to. */
+    return visible_lines > 1 ? visible_lines - 1 : 1;
+}
+
+/* ------------------------------------------------------------- hit test -- */
+
+static bool ui_within(
+    unsigned int x,
+    unsigned int y,
+    float left,
+    float top,
+    float width,
+    float height
+)
+{
+    return (float)x >= left && (float)x < left + width
+        && (float)y >= top && (float)y < top + height;
+}
+
+static UiHit ui_hit_actions(const UiModel *model, unsigned int x, unsigned int y)
+{
+    UiAction actions[UI_ACTIONS_MAX];
+    const size_t count = ui_actions_for(model, actions);
+    for (size_t index = 0; index < count; index++) {
+        float rect_x = 0.0f;
+        float rect_y = 0.0f;
+        float width = 0.0f;
+        float height = 0.0f;
+        ui_action_rect(index, count, &rect_x, &rect_y, &width, &height);
+        if (ui_within(x, y, rect_x, rect_y, width, height)) {
+            return (UiHit){ actions[index].hit, 0 };
+        }
+    }
+    return (UiHit){ UI_HIT_NONE, 0 };
+}
+
+/* Which on-screen row a point falls in, or `rows` when it falls outside. */
+static size_t ui_hit_row(unsigned int x, unsigned int y, size_t rows)
+{
+    if ((float)x < UI_ROW_X || (float)x >= UI_ROW_X + UI_ROW_W) {
+        return rows;
+    }
+    for (size_t index = 0; index < rows; index++) {
+        const float top = UI_ROW_TOP + (float)index * UI_ROW_H;
+        if (ui_within(x, y, UI_ROW_X, top, UI_ROW_W, UI_ROW_H - 2.0f)) {
+            return index;
+        }
+    }
+    return rows;
+}
+
+UiHit ui_hit_test(const UiModel *model, unsigned int x, unsigned int y)
+{
+    const UiHit none = { UI_HIT_NONE, 0 };
+    if (model == NULL) {
+        return none;
+    }
+
+    switch (model->screen) {
+        case UI_SCREEN_MAIN: {
+            if (model->recording) {
+                /* Everything is the talk button while the microphone is open. */
+                return (UiHit){ UI_HIT_TALK, 0 };
+            }
+            if ((float)y < UI_RAIL_H) {
+                if ((float)x >= UI_BOT_W - UI_RAIL_MORE_W) {
+                    return (UiHit){ UI_HIT_TASK_LIST, 0 };
+                }
+                size_t visible = 0;
+                const size_t first = ui_rail_first(model, &visible);
+                const float tab_width = ui_rail_tab_width(visible);
+                if (tab_width > 0.0f) {
+                    const size_t slot = (size_t)((float)x / tab_width);
+                    if (slot < visible) {
+                        return (UiHit){ UI_HIT_TASK, first + slot };
+                    }
+                }
+                return none;
+            }
+            if (ui_max_scroll(model) > 0
+                && (float)y >= UI_RAIL_H
+                && (float)y < UI_RAIL_H + UI_STATUS_H) {
+                const float cluster_x = ui_scroll_cluster_x();
+                for (int index = 0; index < 3; index++) {
+                    const float button_x =
+                        cluster_x + (float)index * (UI_SCROLL_BUTTON + UI_SCROLL_GAP);
+                    if (ui_within(
+                            x,
+                            y,
+                            button_x,
+                            UI_RAIL_H + (UI_STATUS_H - UI_SCROLL_BUTTON) / 2.0f,
+                            UI_SCROLL_BUTTON,
+                            UI_SCROLL_BUTTON
+                        )) {
+                        return (UiHit){
+                            index == 0 ? UI_HIT_SCROLL_BACK
+                                : (index == 1 ? UI_HIT_SCROLL_FORWARD
+                                              : UI_HIT_SCROLL_LATEST),
+                            0,
+                        };
+                    }
+                }
+                return none;
+            }
+            /* Holding the idle hero is the stylus equivalent of holding R. */
+            if (!model->approval_pending
+                && !model->transcript_ready
+                && !model->turn_active
+                && model->microphone_ready
+                && ui_within(x, y, UI_HERO_X, UI_HERO_Y, UI_HERO_W, UI_HERO_H)) {
+                return (UiHit){ UI_HIT_TALK, 0 };
+            }
+            return ui_hit_actions(model, x, y);
+        }
+
+        case UI_SCREEN_HOME: {
+            const size_t rows = model->menu_count < UI_ROW_MAX
+                ? model->menu_count
+                : UI_ROW_MAX;
+            const size_t row = ui_hit_row(x, y, rows);
+            if (row < rows
+                && (model->menu_enabled == NULL || model->menu_enabled[row])) {
+                return (UiHit){ UI_HIT_MENU_ROW, row };
+            }
+            return none;
+        }
+
+        case UI_SCREEN_SESSIONS: {
+            size_t visible = 0;
+            const size_t first = ui_task_list_first(model, &visible);
+            const bool can_start = !model->tasks_loading && !model->tasks_retryable;
+            const size_t row = ui_hit_row(x, y, visible + (can_start ? 1 : 0));
+            if (row < visible) {
+                return (UiHit){ UI_HIT_MENU_ROW, first + row };
+            }
+            if (row == visible && can_start) {
+                return (UiHit){ UI_HIT_SECONDARY, 0 };
+            }
+            return none;
+        }
+
+        case UI_SCREEN_PHOTO:
+        case UI_SCREEN_PAIRING:
+            return ui_hit_actions(model, x, y);
+
+        case UI_SCREEN_BOOT:
+        default:
+            return none;
+    }
 }
 
 static void ui_update_wave(const UiModel *model)

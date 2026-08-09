@@ -64,7 +64,27 @@ Animation is derived from `osGetTime()`, so it is frame-rate independent:
 - a scrolling level trace built from a 28-slot history of microphone level, so
   the meter reads as motion even when the level is steady.
 
-## 4. Screen roles
+## 4. Navigation model
+
+There is one stack, and one way out of each level:
+
+```text
+start screen  ──A──►  tasks  ──A──►  task
+     ▲                   ▲             │
+     └───────B───────────┘◄─────B──────┘
+   START exits                       START jumps to the start screen
+```
+
+`A` accepts and `B` goes back, on every screen and without exception. `B` is
+consumed first by anything that is a decision — declining an approval,
+cancelling a transcript — and only then means "back", so a decision can never be
+skipped by reflex.
+
+`START` is the only key that is not part of the stack. It exits the application
+from the start screen and returns to the start screen from anywhere else. It is
+named on screen only where it is the intended action, which is the start screen.
+
+## 5. Screen roles
 
 ### Start screen
 
@@ -73,13 +93,14 @@ screen states the one fact that decides everything else — whether a machine is
 paired, and which — and the bottom screen is a five-row menu: connect, pair by
 QR, pair by typed code, forget this machine, exit.
 
-Every row carries its own one-line explanation, so this screen has no chip grid;
-five rows plus chips do not fit, and the rows already teach what they do.
-"Forget this machine" is dimmed rather than hidden when nothing is paired, which
-matches how unavailable actions are treated everywhere else.
+Every row carries its own one-line explanation and is itself the touch target,
+so this screen needs no action bar — only the hint line that names `START`, the
+one place where exiting is the intended action.
 
-`START` in the agent loop returns here rather than quitting. Leaving a machine
-is a more common intent than leaving the application.
+"Forget this machine" is dimmed rather than hidden when nothing is paired. It is
+the one deliberate exception to hiding impossible actions: a destructive action
+that vanishes when unavailable is a destructive action the user cannot learn the
+position of.
 
 ### Pairing screen
 
@@ -92,17 +113,37 @@ Decoding, exchanging, success and failure each replace the viewfinder with the
 same attention card the approval and transcript flows use. Failure is always
 recoverable in place: rescan, type the code by hand, or go back.
 
+### Task manager
+
+The list is on the **bottom** screen, because that is the screen a finger can
+reach, and the top screen carries the detail of whichever task is highlighted:
+its state in words, why it is blocked, and whether it is the one already open.
+Two screens, two jobs.
+
+A summary line states what the user would otherwise have to count — `6 TASKS`
+and `2 waiting on you`. "Start a new task" is the last row rather than a
+separate button, so starting a task is reached the same way as opening one; `X`
+remains the shortcut. It is absent while the bridge is unreachable, because
+starting a task would fail exactly as listing them just did.
+
 ### Top screen — read surface
 
 400×240, three bands:
 
-- **header (30 px):** gradient accent rule, `3gent` wordmark, active task label,
-  and the agent-state pill on the right;
+- **header (30 px):** gradient accent rule, `3gent` wordmark, the task position
+  (`2/6`), the active task label, and the agent-state pill on the right. The
+  position is what makes switching legible: without it a changed label gives no
+  clue whether the user moved one step or wrapped around;
 - **body:** an optional one-line prompt echo with an azure rule, then the
   wrapped response with a proportional scrollbar. Word wrapping is measured
   from real glyph advances and cached until the response changes;
 - **footer (24 px):** diff summary (`2 files  +31  -12`), scrollback position,
-  and the applied event cursor.
+  and on the right whichever of two facts deserves the next glance — `2 other
+  tasks need you` in coral, or the applied event cursor when nothing does.
+
+The response buffer keeps the **newest** output. When it fills, whole lines are
+dropped from the front rather than discarding what just arrived; a monitoring
+screen that silently stops updating is worse than one that forgets history.
 
 Two situations take the whole read surface:
 
@@ -113,41 +154,76 @@ Two situations take the whole read surface:
 
 ### Bottom screen — action surface
 
-320×240, four bands:
+320×240, five bands:
 
-- **status (52 px):** the current phase plus two diagnostic detail lines;
-- **hero (96 px):** the one thing to do now — hold-to-talk, live recording
-  meter, agent working, transcript decision, or the approval choice;
-- **chips (56 px):** six context-aware button hints; unavailable actions are
-  dimmed rather than hidden, so the mapping stays learnable;
+- **task rail (32 px):** up to four tasks as tabs, each with a state dot, plus a
+  manager button carrying a coral badge when something elsewhere wants the user.
+  A task that is blocked also pulses, so "needs you" is not carried by hue
+  alone. Tapping a tab switches to it;
+- **status (46 px):** the current phase plus two diagnostic detail lines, and —
+  only when the response is longer than the screen — a three-button scroll
+  cluster: page back, page forward, jump to newest;
+- **hero (72 px):** the one thing to do now — hold-to-talk, agent working, or
+  what is actually being decided. Recording takes the action band as well,
+  because there is no competing action while the microphone is open;
+- **action bar (52 px):** the actions that are live right now, as touch targets
+  with their key caps, and nothing else;
 - **status bar (36 px):** link state, bridge address, and microphone/audio/photo
   tokens.
 
-## 5. Physical-button mapping
+## 6. Physical-button mapping
 
-Current build:
+| Key | Task | Task manager | Start screen | Pairing | Photo |
+| --- | --- | --- | --- | --- | --- |
+| `A` | approve · send transcript · type | open | select | rescan/continue | attach |
+| `B` | decline · cancel transcript · **back to tasks** | back | — | cancel | discard |
+| `X` | interrupt while working, otherwise new task | new task | — | — | — |
+| `Y` | edit a pending transcript | — | — | type the code | — |
+| `L` | photo for the next prompt | — | — | — | — |
+| hold `R` | push-to-talk | — | — | — | — |
+| ↑ ↓ | scroll, with held repeat | choose | choose | — | — |
+| ← → | previous / next task | — | — | — | — |
+| `START` | start screen | start screen | **exit** | start screen | — |
 
-- `A`: type and send, or send a reviewed transcript;
-- `X`: approve once when an approval is pending, otherwise send the
-  approval-demo prompt;
-- `B`: decline, interrupt, or cancel a transcript, in that order of precedence;
-- `Y`: edit a pending transcript in the native keyboard;
-- hold `R`: push-to-talk;
-- `L`: capture a photo for the next prompt;
-- D-pad/Circle Pad Up/Down: scroll, including held repeat;
-- `START`: back to the start screen.
+The D-pad and Circle Pad are interchangeable everywhere. Up and down always mean
+"move through what you are reading"; left and right always mean "move between
+tasks".
 
-On the start screen: Up/Down choose, `A` selects, `START` exits.
-On the pairing screen: `Y` switches to typing the code, `B` cancels, and `A`
-rescans after a failure or continues after a success.
+### Actions are shown only when they exist
 
-Approval ergonomics are still pending usability testing. The approve action is
-deliberately not on `A`, and it is drawn as a distinct two-button choice rather
-than a single reflexive confirm.
+There is no permanent grid of key hints. Each screen answers "what can I do
+right now" and the action bar draws exactly that: two buttons for an approval,
+three for a transcript, four when idle, none while recording. An action that is
+impossible is absent rather than dimmed — a standing row of dead keys teaches
+the user to stop reading it.
 
-## 6. Voice UX
+Screens whose content is a list are the exception: their rows are the targets,
+so they carry one quiet line of key hints instead of a second bank of buttons
+competing with the list.
 
-1. Hold push-to-talk.
+## 7. Touch
+
+The bottom screen is a real input surface, not a second display.
+
+`ui_hit_test` resolves a point to the same semantic action the renderer drew
+there, sharing the renderer's layout functions, so a target cannot drift away
+from the thing that looks like it. `main.c` folds the result back into the key
+that already implements the action, which means there is exactly one
+implementation of every action and touch cannot develop its own behaviour.
+
+Targets are **armed on contact and fire on release over the same target**, so a
+mis-aimed stylus is recoverable by sliding off before lifting. The touch
+position is only meaningful while contact is held — after the lift the hardware
+reports the origin, which is a live target — so the last held point is retained
+and the release is judged against that.
+
+Reachable by stylus: task tabs, the manager button, list rows, every action-bar
+button, the scroll cluster, and the push-to-talk panel, which is held rather
+than tapped and is the one-handed alternative to holding `R`.
+
+## 8. Voice UX
+
+1. Hold `R`, or hold the push-to-talk panel with the stylus.
 2. Both screens switch to the recording treatment: elapsed time, level trace,
    and progress toward the five-minute bound.
 3. Release.
@@ -158,18 +234,25 @@ than a single reflexive confirm.
 Review-before-send is the accepted default; voice capture never silently becomes
 an agent prompt immediately after release.
 
-## 7. Text UX
+## 9. Text UX
 
 Use the native software keyboard. It is a modal applet, so the pushed control
 link is stopped and restarted around it.
 
-## 8. Approval UX
+## 10. Approval UX
 
-The card shows what wants permission and the command or path it affects, wrapped
-over up to five lines with an explicit overflow count. The bottom screen shows
-the two choices as separate buttons with their key caps.
+The top card shows what wants permission and the command or path it affects,
+wrapped over up to five lines with an explicit overflow count. The bottom screen
+repeats the first three lines above two large buttons carrying their key caps,
+so the decision and the thing being decided are on the same screen as the finger.
 
-## 9. Camera and QR
+`A` approves and `B` declines, which is the same grammar as everywhere else. The
+product rule that approvals must be hard to trigger by accident is preserved by
+arming instead of by placement: `A` is ignored for 450 ms after the request
+appears, so a press already travelling toward something else cannot answer it,
+and the screen says "Read it first, then approve" if one does. See D-023.
+
+## 11. Camera and QR
 
 Implemented pairing: the bridge prints a QR code (and an SVG for a brighter,
 larger target), the handheld opens a viewfinder, and the outcome is immediate
@@ -183,11 +266,11 @@ attach with `A` or discard with `B`, then a bounded upload with a progress bar.
 The RGB565 frame is tiled into a GPU texture; the sampled v-axis convention is
 detected at runtime from the system font rather than assumed.
 
-## 10. Stylus capture (outside the current goal)
+## 12. Stylus capture (outside the current goal)
 
 If revisited later: full bottom-screen canvas, clear, undo, pen thickness, send.
 
-## 11. Accessibility/reliability principles
+## 13. Accessibility/reliability principles
 
 - every network action has visible status;
 - every failure has a retry path;
@@ -196,7 +279,7 @@ If revisited later: full bottom-screen canvas, clear, undo, pen thickness, send.
 - do not rely only on colour to show agent state;
 - avoid tiny interaction targets.
 
-## 12. Reviewing the interface without hardware
+## 14. Reviewing the interface without hardware
 
 `tools/ui-preview/` compiles `client-3ds/source/ui.c` against a recording
 backend and writes one SVG per interface state plus an `index.html` contact

@@ -62,12 +62,22 @@ static char current_session_label[SESSION_LABEL_CAPACITY];
 static char audio_capture_path[128];
 static char session_ids[MAX_SESSION_CHOICES][65];
 static char session_labels[MAX_SESSION_CHOICES][SESSION_LABEL_CAPACITY];
-static const char *session_label_pointers[MAX_SESSION_CHOICES];
-static size_t session_count;
-static size_t session_selected;
-static bool sessions_loading;
-static bool sessions_retryable;
-static char sessions_status[160];
+static UiTask tasks[MAX_SESSION_CHOICES];
+/*
+ * The last event sequence the user has actually seen for each task. The bridge
+ * reports every task's `lastSequence`, so a task that has moved past what we
+ * last showed is carrying output the user has not read.
+ */
+static unsigned int task_seen_sequence[MAX_SESSION_CHOICES];
+static size_t task_count;
+static size_t task_selected;
+static size_t task_active;
+static bool task_active_valid;
+static bool tasks_loading;
+static bool tasks_retryable;
+static char task_status_line[160];
+static bool task_refresh_active;
+static u64 task_refresh_checked_ms;
 static char pending_transcript[THREEGENT_PROMPT_CAPACITY];
 static bool transcript_ready;
 static bool photo_pending;
@@ -79,6 +89,22 @@ static unsigned int diff_files;
 static unsigned int diff_additions;
 static unsigned int diff_deletions;
 static UiScreen current_screen = UI_SCREEN_BOOT;
+
+/* Touch, resolved against the frame the user is actually looking at. */
+static bool touch_is_down;
+static unsigned int touch_point_x;
+static unsigned int touch_point_y;
+static UiHit touch_armed;
+static UiHit touch_released;
+
+/*
+ * An approval must not be answerable by a keypress that was already on its way
+ * to something else, so A is ignored for a moment after the request appears.
+ * The product rule is that approvals are hard to trigger by accident; putting
+ * approve on A satisfies the button grammar, and this preserves the rule.
+ */
+#define APPROVAL_ARMING_MS 450
+static u64 approval_arrived_ms;
 
 /*
  * The endpoint is runtime state, not a build constant. A paired machine
@@ -126,6 +152,8 @@ static bool home_menu_enabled[HOME_MENU_COUNT] = {
 };
 static size_t menu_selected;
 
+static bool restart_push_link(void);
+
 static void set_view_state(const char *state)
 {
     snprintf(view_state, sizeof(view_state), "%s", state);
@@ -149,16 +177,48 @@ static void set_response(const char *format, ...)
     response_scroll_lines = 0;
 }
 
+/*
+ * Keeps the newest output rather than the oldest. Replaying a long task from
+ * the start used to fill the buffer and then silently discard everything after
+ * it, which is exactly backwards for a screen whose job is to show what the
+ * agent is doing now. Dropping whole lines from the front keeps the buffer a
+ * readable tail window and keeps memory bounded.
+ */
 static void append_response(const char *text)
 {
     if (text == NULL || text[0] == '\0') {
         return;
     }
+
+    const size_t incoming = strlen(text);
     size_t used = strlen(response);
-    if (used + 1 >= sizeof(response)) {
+
+    if (incoming + 1 >= sizeof(response)) {
+        /* One oversized chunk: keep its tail, which is the most recent part. */
+        const size_t kept = sizeof(response) - 1;
+        memmove(response, text + (incoming - kept), kept);
+        response[kept] = '\0';
+        response_scroll_lines = 0;
         return;
     }
-    snprintf(response + used, sizeof(response) - used, "%s", text);
+
+    if (used + incoming + 1 > sizeof(response)) {
+        const size_t needed = used + incoming + 1 - sizeof(response);
+        size_t drop = needed;
+        /* Prefer cutting at a line break so the top of the view is not a stub. */
+        while (drop < used && response[drop] != '\n') {
+            drop++;
+        }
+        if (drop < used) {
+            drop++;
+        } else {
+            drop = needed;
+        }
+        memmove(response, response + drop, used - drop + 1);
+        used -= drop;
+    }
+
+    memcpy(response + used, text, incoming + 1);
     response_scroll_lines = 0;
 }
 
@@ -242,12 +302,14 @@ static void build_model(UiModel *model)
     model->diff_additions = diff_additions;
     model->diff_deletions = diff_deletions;
 
-    model->session_labels = session_label_pointers;
-    model->session_count = session_count;
-    model->session_selected = session_selected;
-    model->sessions_loading = sessions_loading;
-    model->sessions_retryable = sessions_retryable;
-    model->sessions_status = sessions_status;
+    model->tasks = tasks;
+    model->task_count = task_count;
+    model->task_selected = task_selected;
+    model->task_active = task_active;
+    model->task_active_valid = task_active_valid && task_active < task_count;
+    model->tasks_loading = tasks_loading;
+    model->tasks_retryable = tasks_retryable;
+    model->tasks_status = task_status_line;
 
     model->photo_caption = photo_caption;
     model->photo_progress_percent = photo_progress_percent;
@@ -267,6 +329,75 @@ static void build_model(UiModel *model)
     model->pairing_message = pairing_message;
     model->pairing_bridge = pairing_bridge_line;
     model->pairing_frames_examined = qr_scanner_frames_examined();
+
+    model->touch_down = touch_is_down;
+    model->touch_x = touch_point_x;
+    model->touch_y = touch_point_y;
+}
+
+/*
+ * Touch is read once per frame and folded into the same handlers the physical
+ * keys use, so there is exactly one implementation of every action. A target is
+ * armed on contact and fires on release over the same target, which makes a
+ * mis-aimed stylus recoverable by sliding off before lifting.
+ */
+static void update_touch(u32 keys_down, u32 keys_held, u32 keys_up)
+{
+    /*
+     * The touch position is only meaningful while contact is held; after the
+     * lift it reads as the origin, which is a live target on some screens. So
+     * the last held point is retained and the release is judged against that.
+     */
+    if ((keys_held & KEY_TOUCH) != 0) {
+        touchPosition touch;
+        hidTouchRead(&touch);
+        touch_point_x = touch.px;
+        touch_point_y = touch.py;
+        touch_is_down = true;
+    } else {
+        touch_is_down = false;
+    }
+
+    if ((keys_down & KEY_TOUCH) != 0) {
+        UiModel model;
+        build_model(&model);
+        touch_armed = ui_hit_test(&model, touch_point_x, touch_point_y);
+        touch_released.kind = UI_HIT_NONE;
+        return;
+    }
+
+    if ((keys_up & KEY_TOUCH) != 0) {
+        UiModel model;
+        build_model(&model);
+        const UiHit lifted = ui_hit_test(&model, touch_point_x, touch_point_y);
+        touch_released = (lifted.kind == touch_armed.kind
+                && lifted.index == touch_armed.index)
+            ? lifted
+            : (UiHit){ UI_HIT_NONE, 0 };
+        touch_armed.kind = UI_HIT_NONE;
+        return;
+    }
+
+    touch_released.kind = UI_HIT_NONE;
+}
+
+/* True while the user is holding the on-screen push-to-talk panel. */
+static bool touch_talk_held(u32 keys_held)
+{
+    return (keys_held & KEY_TOUCH) != 0 && touch_armed.kind == UI_HIT_TALK;
+}
+
+/* Folds a completed tap into the key it stands for. */
+static u32 touch_virtual_key(void)
+{
+    switch (touch_released.kind) {
+        case UI_HIT_PRIMARY:   return KEY_A;
+        case UI_HIT_SECONDARY: return KEY_X;
+        case UI_HIT_TERTIARY:  return KEY_Y;
+        case UI_HIT_BACK:      return KEY_B;
+        case UI_HIT_PHOTO:     return KEY_L;
+        default:               return 0;
+    }
 }
 
 static void render_frame(void)
@@ -389,29 +520,30 @@ static bool json_read_string(
 
 /* ---------------------------------------------------------- task selection -- */
 
-static void set_sessions_status(const char *status)
+static void set_task_status(const char *status)
 {
-    snprintf(sessions_status, sizeof(sessions_status), "%s", status != NULL ? status : "");
+    snprintf(task_status_line, sizeof(task_status_line), "%s", status != NULL ? status : "");
 }
 
 static bool wait_for_control_request(const char *status)
 {
-    sessions_loading = true;
+    tasks_loading = true;
     set_view_state(status);
-    set_sessions_status(status);
+    set_task_status(status);
     render_frame();
 
     while (aptMainLoop()) {
         hidScanInput();
-        if ((hidKeysDown() & KEY_START) != 0) {
+        /* B is "back" everywhere, including out of a request that is hanging. */
+        if ((hidKeysDown() & (KEY_B | KEY_START)) != 0) {
             network_control_cancel();
-            sessions_loading = false;
+            tasks_loading = false;
             return false;
         }
         network_pump();
         NetworkOperationStatus operation = network_control_status();
         if (operation == NETWORK_OPERATION_SUCCEEDED) {
-            sessions_loading = false;
+            tasks_loading = false;
             return true;
         }
         if (operation == NETWORK_OPERATION_FAILED) {
@@ -422,14 +554,132 @@ static bool wait_for_control_request(const char *status)
                 network_control_error()
             );
             network_control_consume();
-            sessions_loading = false;
+            tasks_loading = false;
             return false;
         }
         render_frame();
     }
     network_control_cancel();
-    sessions_loading = false;
+    tasks_loading = false;
     return false;
+}
+
+static UiTaskState task_state_from_summary(
+    const char *state,
+    const char *pending_approval_id
+)
+{
+    if (pending_approval_id[0] != '\0'
+        || strcmp(state, "waiting_for_user") == 0) {
+        return UI_TASK_ATTENTION;
+    }
+    if (strcmp(state, "working") == 0) {
+        return UI_TASK_WORKING;
+    }
+    if (strcmp(state, "failed") == 0) {
+        return UI_TASK_FAILED;
+    }
+    if (strcmp(state, "idle") == 0 || strcmp(state, "completed") == 0) {
+        return UI_TASK_IDLE;
+    }
+    return UI_TASK_UNKNOWN;
+}
+
+/*
+ * Parses a `/v1/sessions` body into the task list. It keeps the open task
+ * selected by matching its session ID rather than its position, because the
+ * bridge orders by recency and the list reshuffles underneath the user.
+ */
+static void apply_session_list(const char *body)
+{
+    char previous_active_id[sizeof(session_ids[0])] = "";
+    if (task_active_valid && task_active < task_count) {
+        snprintf(
+            previous_active_id,
+            sizeof(previous_active_id),
+            "%.64s",
+            session_ids[task_active]
+        );
+    }
+    /* Seen-sequence is keyed by session ID, so remember it before reordering. */
+    char previous_ids[MAX_SESSION_CHOICES][sizeof(session_ids[0])];
+    unsigned int previous_seen[MAX_SESSION_CHOICES];
+    const size_t previous_count = task_count < MAX_SESSION_CHOICES
+        ? task_count
+        : MAX_SESSION_CHOICES;
+    for (size_t index = 0; index < previous_count; index++) {
+        snprintf(previous_ids[index], sizeof(previous_ids[index]), "%.64s", session_ids[index]);
+        previous_seen[index] = task_seen_sequence[index];
+    }
+
+    const char *cursor = strstr(body, "\"sessions\":[");
+    task_count = 0;
+    if (cursor != NULL) {
+        while (task_count < MAX_SESSION_CHOICES) {
+            cursor = strstr(cursor, "\"sessionId\":");
+            if (cursor == NULL) {
+                break;
+            }
+            if (!json_read_string(
+                    cursor,
+                    "sessionId",
+                    session_ids[task_count],
+                    sizeof(session_ids[task_count])
+                ) || !json_read_string(
+                    cursor,
+                    "label",
+                    session_labels[task_count],
+                    sizeof(session_labels[task_count])
+                )) {
+                break;
+            }
+
+            char state[24] = "";
+            char approval[65] = "";
+            unsigned int last_sequence = 0;
+            json_read_string(cursor, "state", state, sizeof(state));
+            json_read_string(cursor, "pendingApprovalId", approval, sizeof(approval));
+            json_read_unsigned(cursor, "lastSequence", &last_sequence);
+
+            /*
+             * A task the user is currently reading is never unread; anything
+             * else is unread once the bridge has moved past what we last showed.
+             * A task we have never seen starts read, so opening the app does not
+             * claim that every existing task is new.
+             */
+            unsigned int seen = last_sequence;
+            if (previous_active_id[0] == '\0'
+                || strcmp(previous_active_id, session_ids[task_count]) != 0) {
+                for (size_t index = 0; index < previous_count; index++) {
+                    if (strcmp(previous_ids[index], session_ids[task_count]) == 0) {
+                        seen = previous_seen[index];
+                        break;
+                    }
+                }
+            }
+
+            tasks[task_count].label = session_labels[task_count];
+            tasks[task_count].state = task_state_from_summary(state, approval);
+            tasks[task_count].unread = last_sequence > seen;
+            task_seen_sequence[task_count] = seen;
+            task_count++;
+            cursor += strlen("\"sessionId\":");
+        }
+    }
+
+    task_active_valid = false;
+    if (previous_active_id[0] != '\0') {
+        for (size_t index = 0; index < task_count; index++) {
+            if (strcmp(session_ids[index], previous_active_id) == 0) {
+                task_active = index;
+                task_active_valid = true;
+                break;
+            }
+        }
+    }
+    if (task_selected >= task_count) {
+        task_selected = task_count > 0 ? task_count - 1 : 0;
+    }
 }
 
 static bool load_session_choices(void)
@@ -454,39 +704,70 @@ static bool load_session_choices(void)
         return false;
     }
 
-    const char *body = network_control_response();
-    const char *cursor = strstr(body, "\"sessions\":[");
-    session_count = 0;
-    if (cursor != NULL) {
-        while (session_count < MAX_SESSION_CHOICES) {
-            cursor = strstr(cursor, "\"sessionId\":");
-            if (cursor == NULL) {
-                break;
-            }
-            if (!json_read_string(
-                    cursor,
-                    "sessionId",
-                    session_ids[session_count],
-                    sizeof(session_ids[session_count])
-                ) || !json_read_string(
-                    cursor,
-                    "label",
-                    session_labels[session_count],
-                    sizeof(session_labels[session_count])
-                )) {
-                break;
-            }
-            session_label_pointers[session_count] = session_labels[session_count];
-            session_count++;
-            cursor += strlen("\"sessionId\":");
-        }
-    }
+    apply_session_list(network_control_response());
     network_control_consume();
     return true;
 }
 
+/*
+ * A task the user is not looking at can start needing them at any moment, so
+ * the list is re-read in the background while the agent loop runs. It never
+ * competes for the single control slot: it only starts when nothing else holds
+ * it, and any foreground request cancels it first.
+ */
+#define TASK_REFRESH_INTERVAL_MS 5000
+
+static void cancel_task_refresh(void)
+{
+    if (task_refresh_active) {
+        network_control_cancel();
+        task_refresh_active = false;
+    }
+}
+
+static void update_task_refresh(void)
+{
+    if (task_refresh_active) {
+        const NetworkOperationStatus status = network_control_status();
+        if (status == NETWORK_OPERATION_SUCCEEDED) {
+            if (network_control_http_status() == 200) {
+                apply_session_list(network_control_response());
+            }
+            network_control_consume();
+            task_refresh_active = false;
+            task_refresh_checked_ms = osGetTime();
+        } else if (status == NETWORK_OPERATION_FAILED) {
+            network_control_consume();
+            task_refresh_active = false;
+            task_refresh_checked_ms = osGetTime();
+        }
+        return;
+    }
+
+    if (!network_ready
+        || recording_session_active
+        || network_control_status() != NETWORK_OPERATION_IDLE) {
+        return;
+    }
+    const u64 now = osGetTime();
+    if (now - task_refresh_checked_ms < TASK_REFRESH_INTERVAL_MS) {
+        return;
+    }
+    task_refresh_checked_ms = now;
+
+    char error[96];
+    task_refresh_active = network_control_begin_get(
+        active_host,
+        active_port,
+        "/v1/sessions?limit=6",
+        error,
+        sizeof(error)
+    );
+}
+
 static bool start_new_session(void)
 {
+    cancel_task_refresh();
     const char body[] = "{}";
     if (!network_control_begin_post(
             active_host,
@@ -528,9 +809,10 @@ static bool start_new_session(void)
 
 static bool resume_session(size_t selected)
 {
-    if (selected >= session_count) {
+    if (selected >= task_count) {
         return false;
     }
+    cancel_task_refresh();
     char path[112];
     snprintf(path, sizeof(path), "/v1/sessions/%s/resume", session_ids[selected]);
     if (!network_control_begin_post(
@@ -562,22 +844,134 @@ static bool resume_session(size_t selected)
     return true;
 }
 
-static bool choose_session(void)
+/*
+ * Points every per-task path and the pushed link at whatever `current_session_id`
+ * now holds. Called after resuming or starting a task, whether that happened in
+ * the manager or from the rail without leaving the agent loop.
+ */
+static void attach_to_current_session(void)
+{
+    snprintf(
+        audio_capture_path,
+        sizeof(audio_capture_path),
+        "/v1/sessions/%s/captures/audio",
+        current_session_id
+    );
+    snprintf(
+        photo_capture_path,
+        sizeof(photo_capture_path),
+        "/v1/sessions/%s/captures/photo",
+        current_session_id
+    );
+
+    /*
+     * The task being left has been read up to the cursor we applied, so record
+     * that before it is reset. Anything the bridge adds afterwards is what makes
+     * the rail mark it unread.
+     */
+    if (task_active_valid && task_active < task_count) {
+        task_seen_sequence[task_active] = event_cursor;
+    }
+
+    /*
+     * Everything below belongs to the task being left. A transcript that was
+     * never sent, a half-read response and an approval that is scoped to the
+     * other session must not follow the user across.
+     */
+    event_cursor = 0;
+    clear_response();
+    prompt[0] = '\0';
+    pending_transcript[0] = '\0';
+    transcript_ready = false;
+    pending_approval_id[0] = '\0';
+    pending_approval_summary[0] = '\0';
+    photo_pending = false;
+    diff_known = false;
+    turn_active = false;
+    snprintf(agent_state, sizeof(agent_state), "connecting");
+
+    task_active_valid = false;
+    for (size_t index = 0; index < task_count; index++) {
+        if (strcmp(session_ids[index], current_session_id) == 0) {
+            task_active = index;
+            task_selected = index;
+            task_active_valid = true;
+            tasks[index].unread = false;
+            task_seen_sequence[index] = 0xFFFFFFFFu;
+            break;
+        }
+    }
+
+    network_push_stop();
+    restart_push_link();
+}
+
+/* Opens task `index` in place. Returns false and says why if the bridge says no. */
+static bool open_task(size_t index)
+{
+    if (index >= task_count) {
+        return false;
+    }
+    if (task_active_valid && index == task_active) {
+        return true;
+    }
+    network_push_stop();
+    if (!resume_session(index)) {
+        set_task_status(network_detail);
+        set_view_state("Could not open that task");
+        /* The previous task is still the live one; put its link back. */
+        restart_push_link();
+        return false;
+    }
+    attach_to_current_session();
+    set_view_state("Opened task");
+    return true;
+}
+
+static bool start_and_open_new_task(void)
+{
+    network_push_stop();
+    if (!start_new_session()) {
+        set_task_status(network_detail);
+        restart_push_link();
+        return false;
+    }
+    /* The new task is not in the list yet, so refresh before attaching. */
+    load_session_choices();
+    attach_to_current_session();
+    set_view_state("New task started");
+    return true;
+}
+
+typedef enum {
+    TASKS_OPENED = 0,
+    TASKS_BACK,
+} TasksResult;
+
+/*
+ * The task manager. Rows are the targets, so touch and the D-pad reach the same
+ * thing; A opens, X starts a new one, B goes back to the start screen.
+ */
+static TasksResult run_task_manager(void)
 {
     current_screen = UI_SCREEN_SESSIONS;
+    cancel_task_refresh();
+
     while (!load_session_choices()) {
-        session_count = 0;
-        sessions_retryable = true;
+        task_count = 0;
+        tasks_retryable = true;
         bool retry = false;
         set_view_state("Task discovery failed");
-        set_sessions_status(network_detail);
+        set_task_status(network_detail);
         render_frame();
 
         while (aptMainLoop()) {
             hidScanInput();
-            u32 keys = hidKeysDown();
-            if ((keys & KEY_START) != 0) {
-                return false;
+            const u32 keys_down = hidKeysDown();
+            update_touch(keys_down, hidKeysHeld(), hidKeysUp());
+            const u32 keys = keys_down | touch_virtual_key();
+            if ((keys & (KEY_B | KEY_START)) != 0) {
+                return TASKS_BACK;
             }
             if ((keys & (KEY_A | KEY_X)) != 0) {
                 retry = true;
@@ -586,48 +980,56 @@ static bool choose_session(void)
             render_frame();
         }
         if (!retry) {
-            return false;
+            return TASKS_BACK;
         }
     }
 
-    sessions_retryable = false;
-    session_selected = 0;
-    set_view_state("Choose a task");
-    set_sessions_status(
-        session_count > 0
-            ? "A resumes the highlighted task, X starts a new one"
-            : "X starts a new task in the bridge workspace"
-    );
+    tasks_retryable = false;
+    set_view_state("Tasks");
+    set_task_status("");
 
     while (aptMainLoop()) {
         hidScanInput();
-        u32 keys = hidKeysDown();
-        if ((keys & KEY_START) != 0) {
-            return false;
+        const u32 keys_down = hidKeysDown();
+        update_touch(keys_down, hidKeysHeld(), hidKeysUp());
+        u32 keys = keys_down | touch_virtual_key();
+        network_pump();
+
+        if (touch_released.kind == UI_HIT_MENU_ROW
+            && touch_released.index < task_count) {
+            task_selected = touch_released.index;
+            keys |= KEY_A;
         }
-        if ((keys & KEY_UP) != 0 && session_count > 0) {
-            session_selected = session_selected == 0
-                ? session_count - 1
-                : session_selected - 1;
+
+        if ((keys & (KEY_B | KEY_START)) != 0) {
+            return TASKS_BACK;
         }
-        if ((keys & KEY_DOWN) != 0 && session_count > 0) {
-            session_selected = (session_selected + 1) % session_count;
+        if ((keys & (KEY_DUP | KEY_CPAD_UP)) != 0 && task_count > 0) {
+            task_selected = task_selected == 0
+                ? task_count - 1
+                : task_selected - 1;
         }
-        if ((keys & KEY_A) != 0 && session_count > 0) {
-            if (resume_session(session_selected)) {
-                return true;
+        if ((keys & (KEY_DDOWN | KEY_CPAD_DOWN)) != 0 && task_count > 0) {
+            task_selected = (task_selected + 1) % task_count;
+        }
+        if ((keys & KEY_A) != 0 && task_count > 0) {
+            if (resume_session(task_selected)) {
+                attach_to_current_session();
+                return TASKS_OPENED;
             }
-            set_sessions_status(network_detail);
+            set_task_status(network_detail);
         }
         if ((keys & KEY_X) != 0) {
             if (start_new_session()) {
-                return true;
+                load_session_choices();
+                attach_to_current_session();
+                return TASKS_OPENED;
             }
-            set_sessions_status(network_detail);
+            set_task_status(network_detail);
         }
         render_frame();
     }
-    return false;
+    return TASKS_BACK;
 }
 
 /* ---------------------------------------------------------------- pairing -- */
@@ -891,7 +1293,9 @@ static void pairing_acknowledge(void)
     render_frame();
     while (aptMainLoop()) {
         hidScanInput();
-        const u32 keys = hidKeysDown();
+        const u32 keys_down = hidKeysDown();
+        update_touch(keys_down, hidKeysHeld(), hidKeysUp());
+        const u32 keys = keys_down | touch_virtual_key();
         if ((keys & (KEY_A | KEY_B | KEY_START)) != 0) {
             return;
         }
@@ -1007,7 +1411,9 @@ static bool run_qr_pairing(void)
     PairingBootstrap bootstrap;
     while (aptMainLoop()) {
         hidScanInput();
-        const u32 keys = hidKeysDown();
+        const u32 keys_down = hidKeysDown();
+        update_touch(keys_down, hidKeysHeld(), hidKeysUp());
+        const u32 keys = keys_down | touch_virtual_key();
         network_pump();
 
         if ((keys & (KEY_B | KEY_START)) != 0) {
@@ -1125,18 +1531,27 @@ static HomeAction run_home_screen(void)
 
     while (aptMainLoop()) {
         hidScanInput();
-        const u32 keys = hidKeysDown();
+        const u32 keys_down = hidKeysDown();
+        update_touch(keys_down, hidKeysHeld(), hidKeysUp());
+        u32 keys = keys_down;
         network_pump();
+
+        /* Tapping a row both moves the highlight and chooses it. */
+        if (touch_released.kind == UI_HIT_MENU_ROW
+            && touch_released.index < HOME_MENU_COUNT) {
+            menu_selected = touch_released.index;
+            keys |= KEY_A;
+        }
 
         if ((keys & KEY_START) != 0) {
             return HOME_EXIT;
         }
-        if ((keys & KEY_UP) != 0) {
+        if ((keys & (KEY_DUP | KEY_CPAD_UP)) != 0) {
             menu_selected = menu_selected == 0
                 ? HOME_MENU_COUNT - 1
                 : menu_selected - 1;
         }
-        if ((keys & KEY_DOWN) != 0) {
+        if ((keys & (KEY_DDOWN | KEY_CPAD_DOWN)) != 0) {
             menu_selected = (menu_selected + 1) % HOME_MENU_COUNT;
         }
         if ((keys & KEY_A) != 0 && home_menu_enabled[menu_selected]) {
@@ -1231,6 +1646,7 @@ static void handle_protocol_event(const char *event_json)
             pending_approval_summary,
             sizeof(pending_approval_summary)
         );
+        approval_arrived_ms = osGetTime();
         append_response("\nApproval required: ");
         append_response(pending_approval_summary);
         append_response("\n");
@@ -1357,6 +1773,7 @@ static bool apply_session_snapshot(const char *snapshot)
             sizeof(pending_approval_summary),
             "Pending approval after event resync"
         );
+        approval_arrived_ms = osGetTime();
     }
 
     clear_response();
@@ -1904,7 +2321,9 @@ static void capture_and_upload_photo(void)
     bool accepted = false;
     while (aptMainLoop()) {
         hidScanInput();
-        u32 keys = hidKeysDown();
+        const u32 keys_down = hidKeysDown();
+        update_touch(keys_down, hidKeysHeld(), hidKeysUp());
+        const u32 keys = keys_down | touch_virtual_key();
         network_pump();
         update_push_link();
         render_frame();
@@ -2014,6 +2433,24 @@ static void change_scroll(bool scroll_up)
     }
 }
 
+/* The on-screen scroll controls move a page, because a tap should be worth it. */
+static void scroll_by_page(bool scroll_up)
+{
+    UiModel model;
+    build_model(&model);
+    const size_t max_scroll = ui_max_scroll(&model);
+    const size_t page = ui_page_lines(&model);
+    if (scroll_up) {
+        response_scroll_lines = response_scroll_lines + page > max_scroll
+            ? max_scroll
+            : response_scroll_lines + page;
+    } else {
+        response_scroll_lines = response_scroll_lines > page
+            ? response_scroll_lines - page
+            : 0;
+    }
+}
+
 static void handle_scroll_input(u32 keys_down, u32 keys_held)
 {
     const u32 scroll_up_keys = KEY_DUP | KEY_CPAD_UP;
@@ -2057,6 +2494,17 @@ static void handle_scroll_input(u32 keys_down, u32 keys_held)
 /* ------------------------------------------------------------ connected run -- */
 
 /*
+ * How the agent loop ended. "Back" is one step out to the task manager; only
+ * START leaves the machine entirely.
+ */
+typedef enum {
+    AGENT_EXIT_TASKS = 0,
+    AGENT_EXIT_HOME,
+} AgentExit;
+
+static AgentExit run_agent_loop(void);
+
+/*
  * Connects to the active machine and runs the agent loop until the user leaves.
  * Everything before this point is endpoint selection; nothing after it knows or
  * cares whether the endpoint came from a pairing or from the build constants.
@@ -2091,26 +2539,52 @@ static void run_connected_session(void)
         set_view_state("Server offline - retry action");
     }
 
-    if (!choose_session()) {
-        network_reset_connections();
-        current_screen = UI_SCREEN_HOME;
+    /*
+     * Task manager and agent loop alternate. B in the agent loop returns here
+     * rather than to the start screen, so "back" is one consistent step out.
+     */
+    while (aptMainLoop()) {
+        if (run_task_manager() == TASKS_BACK) {
+            break;
+        }
+        if (run_agent_loop() == AGENT_EXIT_HOME) {
+            break;
+        }
+    }
+
+    network_push_stop();
+    network_reset_connections();
+    turn_active = false;
+    transcript_ready = false;
+    pending_approval_id[0] = '\0';
+    pending_approval_summary[0] = '\0';
+    photo_pending = false;
+    clear_response();
+    prompt[0] = '\0';
+    task_count = 0;
+    task_active_valid = false;
+    current_session_id[0] = '\0';
+    current_session_label[0] = '\0';
+    snprintf(agent_state, sizeof(agent_state), "connecting");
+    current_screen = UI_SCREEN_HOME;
+}
+
+/* Moves `step` tasks along the rail, wrapping, and opens what it lands on. */
+static void step_to_adjacent_task(int step)
+{
+    if (task_count < 2 || !task_active_valid) {
         return;
     }
-    snprintf(
-        audio_capture_path,
-        sizeof(audio_capture_path),
-        "/v1/sessions/%s/captures/audio",
-        current_session_id
-    );
-    snprintf(
-        photo_capture_path,
-        sizeof(photo_capture_path),
-        "/v1/sessions/%s/captures/photo",
-        current_session_id
-    );
-    event_cursor = 0;
-    restart_push_link();
+    const size_t next = step > 0
+        ? (task_active + 1) % task_count
+        : (task_active == 0 ? task_count - 1 : task_active - 1);
+    open_task(next);
+}
+
+static AgentExit run_agent_loop(void)
+{
     current_screen = UI_SCREEN_MAIN;
+    task_refresh_checked_ms = osGetTime();
 
     while (aptMainLoop()) {
         hidScanInput();
@@ -2120,9 +2594,54 @@ static void run_connected_session(void)
 
         network_pump();
         update_push_link();
+        update_task_refresh();
+        update_touch(keys_down, keys_held, keys_up);
+
+        /*
+         * Touch is resolved to the action it was drawn as, then folded into the
+         * key that already implements it. Rail and scroll targets have no key
+         * equivalent, so they act here.
+         */
+        keys_down |= touch_virtual_key();
+        if (touch_released.kind == UI_HIT_TASK) {
+            open_task(touch_released.index);
+            render_frame();
+            continue;
+        }
+        if (touch_released.kind == UI_HIT_TASK_LIST) {
+            return AGENT_EXIT_TASKS;
+        }
+        if (touch_released.kind == UI_HIT_SCROLL_BACK) {
+            scroll_by_page(true);
+        } else if (touch_released.kind == UI_HIT_SCROLL_FORWARD) {
+            scroll_by_page(false);
+        } else if (touch_released.kind == UI_HIT_SCROLL_LATEST) {
+            response_scroll_lines = 0;
+        }
+        /* Holding the on-screen panel is the stylus form of holding R. */
+        if (touch_talk_held(keys_held)) {
+            keys_held |= KEY_R;
+            if ((keys_down & KEY_TOUCH) != 0) {
+                keys_down |= KEY_R;
+            }
+        }
+        if (recording_session_active
+            && touch_armed.kind == UI_HIT_TALK
+            && (keys_up & KEY_TOUCH) != 0) {
+            keys_up |= KEY_R;
+        }
 
         if ((keys_down & KEY_START) != 0) {
-            break;
+            return AGENT_EXIT_HOME;
+        }
+
+        /* Left and right walk the rail without leaving the conversation. */
+        if (!recording_session_active && !transcript_ready) {
+            if ((keys_down & (KEY_DLEFT | KEY_CPAD_LEFT)) != 0) {
+                step_to_adjacent_task(-1);
+            } else if ((keys_down & (KEY_DRIGHT | KEY_CPAD_RIGHT)) != 0) {
+                step_to_adjacent_task(1);
+            }
         }
 
         if ((keys_down & KEY_R) != 0 && !recording_session_active) {
@@ -2160,7 +2679,18 @@ static void run_connected_session(void)
         }
 
         if ((keys_down & KEY_A) != 0) {
-            if (transcript_ready) {
+            if (pending_approval_id[0] != '\0') {
+                /*
+                 * Approve is on A so the button grammar holds, but a press
+                 * that was already travelling toward something else must not
+                 * answer a request that appeared a frame ago.
+                 */
+                if (osGetTime() - approval_arrived_ms >= APPROVAL_ARMING_MS) {
+                    respond_to_approval("approve_once");
+                } else {
+                    set_view_state("Read it first, then approve");
+                }
+            } else if (transcript_ready) {
                 snprintf(prompt, sizeof(prompt), "%s", pending_transcript);
                 submit_text_capture(prompt);
             } else if (turn_active || push_command_kind != PUSH_COMMAND_NONE) {
@@ -2210,14 +2740,16 @@ static void run_connected_session(void)
             }
         }
 
-        if ((keys_down & KEY_X) != 0) {
-            if (pending_approval_id[0] != '\0') {
-                respond_to_approval("approve_once");
-            } else if (!turn_active) {
-                submit_text_capture("please request approval");
+        /* X is the secondary: stop what is running, or start something new. */
+        if ((keys_down & KEY_X) != 0 && pending_approval_id[0] == '\0') {
+            if (turn_active) {
+                interrupt_active_turn();
+            } else if (!transcript_ready) {
+                start_and_open_new_task();
             }
         }
 
+        /* B is always "back", except where there is a decision to back out of. */
         if ((keys_down & KEY_B) != 0) {
             if (transcript_ready) {
                 transcript_ready = false;
@@ -2229,7 +2761,7 @@ static void run_connected_session(void)
             } else if (pending_approval_id[0] != '\0') {
                 respond_to_approval("decline");
             } else {
-                interrupt_active_turn();
+                return AGENT_EXIT_TASKS;
             }
         }
 
@@ -2238,21 +2770,7 @@ static void run_connected_session(void)
         render_frame();
     }
 
-    /* Leaving the agent loop returns to the start screen, not to the launcher. */
-    network_push_stop();
-    network_reset_connections();
-    turn_active = false;
-    transcript_ready = false;
-    pending_approval_id[0] = '\0';
-    pending_approval_summary[0] = '\0';
-    photo_pending = false;
-    clear_response();
-    prompt[0] = '\0';
-    session_count = 0;
-    current_session_id[0] = '\0';
-    current_session_label[0] = '\0';
-    snprintf(agent_state, sizeof(agent_state), "connecting");
-    current_screen = UI_SCREEN_HOME;
+    return AGENT_EXIT_HOME;
 }
 
 /* --------------------------------------------------------------------- main -- */

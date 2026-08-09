@@ -26,7 +26,7 @@ repository and disposable prompts/media throughout this build.
    The address is now only the fallback for the start screen's "Connect" row
    when nothing is paired; pairing overrides it. Require a clean build.
 5. Copy `3gent.3dsx` and `3gent.smdh` to `/3ds/3gent/` on the SD card. Confirm
-   Homebrew Launcher shows version `0.8.0-pairing`.
+   Homebrew Launcher shows version `0.9.0-ui`.
 6. Create a disposable Git repository/worktree containing at least one text file.
 
 ## B. Interface rendering gate
@@ -124,6 +124,55 @@ npm start -- --host 0.0.0.0 --pair --devices-path ./data/devices.json
 16. Choose "Forget this machine". Confirm the start screen returns to the
     unpaired state and that the bridge still lists the device — forgetting is
     local, revocation is not.
+
+## B3. Touch, navigation and task switching gate
+
+New in `0.9.0-ui` (D-023, R-022). Everything here is a hardware-only question:
+the preview proves the layout, not whether a thumb or stylus can hit it. Run it
+with at least three tasks on the bridge, one of which is left blocked on an
+approval.
+
+1. On the task screen, press `B`. Confirm it returns to the task manager, not to
+   the start screen, and that pressing `B` again returns to the start screen.
+   `START` from the task screen must jump straight to the start screen.
+2. With an approval pending, press `B` and confirm it declines rather than
+   navigating away. Cancel a transcript with `B` and confirm the same.
+3. Trigger an approval and press `A` as fast as you can react. Confirm the first
+   press inside the arming window is refused with "Read it first, then approve"
+   and a press a moment later approves. Record whether the delay felt protective
+   or obstructive — this is the open question in D-023.
+4. Tap each action-bar button with the stylus. Confirm the pressed state appears
+   under the tip and the action fires on release. Then press a button, slide off
+   it, and lift: the action must **not** fire.
+5. Repeat step 4 with a thumb rather than the stylus, on the four-across idle
+   bar. Record whether 70 px targets are usable that way; if they are not, the
+   fix is fewer actions per row, not smaller text.
+6. Tap each task tab in the rail and confirm it switches. Time one switch from
+   tap to the first line of that task's output appearing. Record the number:
+   R-022 asks whether stop/resume/replay feels like switching or reconnecting.
+7. Press Left and Right on the D-pad, then on the Circle Pad. Confirm both walk
+   the rail, wrap at the ends, and that the `2/6` position in the header agrees
+   with the highlighted tab every time.
+8. Leave a task blocked on an approval and switch away from it. Within about
+   five seconds its tab must turn coral and pulse, the manager button must show
+   a badge, and the top footer must read "1 other task needs you".
+9. Let a task produce output while you are reading a different one. Confirm its
+   tab gains the unread dot, and that the dot clears once you switch to it.
+10. Switch to a task with a long history. Confirm the read surface shows its
+    **most recent** output, not its oldest, and that scrolling back works.
+11. Hold the push-to-talk panel with the stylus instead of `R`. Confirm
+    recording starts on contact and stops on lift, and that the audio is
+    complete. Then confirm touching anywhere during recording does not switch
+    tasks.
+12. With a response longer than one screen, tap each of the three scroll cluster
+    buttons. Confirm page back, page forward and jump-to-newest, and that the
+    cluster disappears entirely when the response fits.
+13. Tap rows on the start screen and in the task manager. Confirm a tap both
+    highlights and activates, and that the dimmed "Forget this machine" row does
+    nothing when tapped.
+14. Leave the app on the task screen for five minutes without touching it.
+    Confirm the five-second background task refresh causes no visible frame-rate
+    change, no log spam, and no interference with a streaming turn.
 
 ## C. Deterministic fake-adapter regression
 

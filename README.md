@@ -87,6 +87,17 @@ button chips, and a GPU-textured camera review. Rendering lives in
 lets `tools/ui-preview/` compile that same file on a laptop and emit every
 interface state as SVG for review before a hardware run.
 
+Version `0.9.0-ui` makes the handheld a multi-task control surface (D-023,
+R-022). Tasks are switched in place from a touchable rail on the bottom screen
+or with Left/Right, and a task blocked on an approval announces itself from
+whichever task the user is reading. `A` accepts and `B` goes back everywhere;
+key hints appear only where the action exists, replacing the fixed chip grid
+with an action bar built from the current state. The bottom screen is now a real
+input surface: `ui_hit_test` resolves a touch to the action the renderer drew
+there and `main.c` folds it into the key that already implements it, so touch
+cannot acquire behaviour of its own. No bridge change was needed — `/v1/sessions`
+already reports per-task state, pending approvals and event sequence.
+
 Version `0.8.0-pairing` adds the start screen and QR pairing (Stage 4, ADR-0003).
 The handheld no longer dials a compile-time address: it pairs with a machine by
 scanning the QR code the bridge prints, or by typing the same values, and saves

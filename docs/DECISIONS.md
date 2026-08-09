@@ -175,6 +175,65 @@ Consequences:
 This does not change the thin-client invariant. The 3DS still renders state that
 the bridge owns.
 
+### D-023 — Handheld navigation grammar, touch, and live task switching
+
+**Status:** Accepted
+
+The interface now has one navigation grammar: `A` accepts, `B` goes back, the
+bottom screen is touchable, and tasks are switched without leaving the
+conversation.
+
+This reverses a previously documented choice. `UI_UX.md` said the approve action
+was deliberately not on `A`. Keeping it off `A` meant `A` had no stable meaning
+(it was "type", "send", or nothing), `B` meant three unrelated things depending
+on state, and `START` — the key with the strongest "quit" connotation on the
+hardware — was the only way back. The cost of that was paid on every screen to
+protect one.
+
+Alternatives considered:
+
+- **Keep approve on `X`.** Preserves the existing muscle memory and needs no
+  mitigation. But it leaves the whole application without a consistent accept
+  key, which is a larger and more frequent harm than the one it avoids.
+- **Approve on `A`, unmitigated.** Clean grammar, but it violates the standing
+  product rule that approvals must be hard to trigger accidentally (PRODUCT.md
+  §3.6), because the same key sends prompts and dismisses cards.
+- **Approve on `A`, armed.** `A` is ignored for 450 ms after the request
+  appears. A press already in flight toward something else cannot answer it, and
+  a deliberate press a moment later works normally. The two choices are still
+  drawn as separate labelled buttons, never a single reflexive confirm.
+
+Decision: the third. The invariant is preserved by timing rather than by
+placement, and the button grammar becomes learnable everywhere else.
+
+Also accepted as part of the same change:
+
+- **`B` returns to the task manager, not the start screen.** Navigation is a
+  stack: start screen → tasks → task. `START` remains the escape hatch and is
+  named on screen only where exiting is the intended action.
+- **The bottom screen is an input surface.** `ui_hit_test` resolves a point to
+  the action the renderer drew there, sharing the renderer's layout so a target
+  cannot drift from its appearance, and `main.c` folds a hit into the key that
+  already implements it. Touch therefore cannot acquire behaviour of its own.
+- **Key hints are shown only when the action exists.** The fixed six-chip grid
+  is replaced by an action bar built from the current model. Impossible actions
+  are absent rather than dimmed; the one exception is destructive actions on
+  list screens, which stay visible and dimmed so their position is learnable.
+- **Tasks are switched in place.** The rail on the bottom screen and left/right
+  on the D-pad or Circle Pad resume another task and repoint the pushed link
+  without leaving the agent loop. Per-task state comes from `/v1/sessions`,
+  which already reports `state`, `pendingApprovalId` and `lastSequence`, so
+  attention and unread markers need no bridge change.
+- **The response buffer keeps its tail.** Replaying a long task from cursor zero
+  used to fill the buffer and then discard everything after it. It now drops
+  whole lines from the front, which keeps memory bounded and keeps the newest
+  output on screen.
+
+Consequences: `UiModel` gains a task array, an active-task index and a touch
+point; `ui.h` gains `ui_hit_test` and `ui_page_lines`; the agent loop is split
+so the task manager and the conversation alternate. Ergonomics of the arming
+delay and of four-across touch targets still need a physical pass — see R-022.
+
 ---
 
 ## Proposed

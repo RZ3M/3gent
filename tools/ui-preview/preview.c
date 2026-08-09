@@ -14,13 +14,18 @@
 
 #define OUTPUT_DIRECTORY "out"
 
-static const char *sample_labels[6] = {
-    "3gent - wire the citro2d renderer",
-    "bridge - bound the replay window",
-    "protocol - version the capture envelope",
-    "docs - rewrite the hardware checklist",
-    "relay - reject plaintext by default",
-    "client - retry one unacked command",
+static const UiTask sample_tasks[6] = {
+    { "3gent - wire the citro2d renderer", UI_TASK_IDLE, false },
+    { "bridge - bound the replay window", UI_TASK_ATTENTION, false },
+    { "protocol - version the capture envelope", UI_TASK_WORKING, true },
+    { "docs - rewrite the hardware checklist", UI_TASK_IDLE, true },
+    { "relay - reject plaintext by default", UI_TASK_FAILED, false },
+    { "client - retry one unacked command", UI_TASK_IDLE, false },
+};
+
+/* One quiet task, for the states where the rail should not be the story. */
+static const UiTask single_task[1] = {
+    { "3gent - wire the citro2d renderer", UI_TASK_IDLE, false },
 };
 
 static const char *idle_response =
@@ -31,6 +36,28 @@ static const char *idle_response =
     "\n"
     "Moving the cursor write after the handler fixes it, and the resync path "
     "already covers the case where history has expired.";
+
+/* Long enough to overflow the read surface and bring out the scroll controls. */
+static const char *long_response =
+    "The reconnect path is fine; the cursor is written before the event is "
+    "applied, so a frame dropped between those two steps is never replayed.\n"
+    "\n"
+    "I moved the cursor write after the handler and added a test that forces a "
+    "half-open socket in the middle of a turn. The resync path already covered "
+    "the case where history had expired, so that part is unchanged.\n"
+    "\n"
+    "Three things are worth knowing before this ships:\n"
+    "\n"
+    "The retry still assumes one unacknowledged command. That holds today "
+    "because the client refuses to queue a second one, but nothing in the "
+    "protocol enforces it.\n"
+    "\n"
+    "Heartbeats are every three seconds against a twelve second bridge "
+    "timeout, so a stalled write surfaces inside one reconnect window.\n"
+    "\n"
+    "The bounded event history is 256 entries. A client that sleeps through "
+    "more than that resyncs rather than replaying, which is visible on screen "
+    "and not silent.";
 
 static const char *working_response =
     "Reading client-3ds/source/network.c to confirm how the control socket "
@@ -160,7 +187,7 @@ static const bool menu_unpaired[5] = { true, true, true, false, true };
 static void base_model(UiModel *model)
 {
     memset(model, 0, sizeof(*model));
-    model->version = "0.8.0-pairing";
+    model->version = "0.9.0-ui";
     model->session_label = "3gent - wire the citro2d renderer";
     model->server_host = "192.168.1.2";
     model->server_port = 8080;
@@ -180,8 +207,11 @@ static void base_model(UiModel *model)
     model->photo_caption = "";
     model->record_max_ms = 300000;
     model->photo_progress_percent = UI_PHOTO_PROGRESS_NONE;
-    model->session_labels = sample_labels;
-    model->sessions_status = "";
+    model->tasks = single_task;
+    model->task_count = 1;
+    model->task_active = 0;
+    model->task_active_valid = true;
+    model->tasks_status = "";
     model->menu_labels = menu_labels;
     model->menu_hints = menu_hints;
     model->menu_enabled = menu_paired;
@@ -219,7 +249,7 @@ int main(void)
     ui_render(&model);
     write_document("01-home-paired", "start / a machine is already paired");
 
-    /* Start screen, nothing paired yet */
+    /* Start screen, nothing paired yet, with a finger on the second row */
     base_model(&model);
     model.screen = UI_SCREEN_HOME;
     model.agent_state = "";
@@ -238,9 +268,12 @@ int main(void)
         menu_hints[4],
     };
     model.menu_selected = 1;
+    model.touch_down = true;
+    model.touch_x = 160;
+    model.touch_y = 82;
     preview_set_time(700);
     ui_render(&model);
-    write_document("02-home-unpaired", "start / nothing paired yet");
+    write_document("02-home-unpaired", "start / nothing paired, second row touched");
 
     /* Pairing viewfinder */
     base_model(&model);
@@ -284,6 +317,20 @@ int main(void)
     preview_set_time(1600);
     ui_render(&model);
     write_document("05-pairing-failed", "pairing / the bridge refused the code");
+
+    /* Pairing success */
+    base_model(&model);
+    model.screen = UI_SCREEN_PAIRING;
+    model.view_state = "Paired";
+    model.detail = "Device key saved";
+    model.detail_secondary = "";
+    model.pairing_phase = UI_PAIRING_SUCCEEDED;
+    model.pairing_preview_ready = true;
+    model.pairing_message = "Paired with jm-mbp";
+    model.pairing_bridge = "jm-mbp at 192.168.1.42:8080";
+    preview_set_time(1900);
+    ui_render(&model);
+    write_document("06-pairing-succeeded", "pairing / the bridge issued a device key");
     ui_photo_preview_clear();
 
     /* Boot */
@@ -295,24 +342,43 @@ int main(void)
     model.link_state = "connecting";
     preview_set_time(1200);
     ui_render(&model);
-    write_document("06-boot", "boot / warming the low-latency links");
+    write_document("07-boot", "boot / warming the low-latency links");
 
-    /* Task chooser */
+    /* Task manager */
     base_model(&model);
     model.screen = UI_SCREEN_SESSIONS;
     model.agent_state = "connecting";
     model.session_label = "";
-    model.view_state = "Choose a task";
+    model.view_state = "Tasks";
     model.detail = "6 recent Codex tasks";
     model.detail_secondary = "";
-    model.session_count = 6;
-    model.session_selected = 1;
-    model.sessions_status = "A resumes the highlighted task, X starts a new one";
+    model.tasks = sample_tasks;
+    model.task_count = 6;
+    model.task_selected = 1;
+    model.task_active = 0;
+    model.tasks_status = "";
     preview_set_time(2400);
     ui_render(&model);
-    write_document("07-sessions", "task chooser / six recent Codex tasks");
+    write_document("08-tasks", "tasks / one of six is blocked on an approval");
 
-    /* Task chooser, discovery failed */
+    /* Task manager, scrolled to a working task further down the list */
+    base_model(&model);
+    model.screen = UI_SCREEN_SESSIONS;
+    model.agent_state = "connecting";
+    model.session_label = "";
+    model.view_state = "Tasks";
+    model.detail = "6 recent Codex tasks";
+    model.detail_secondary = "";
+    model.tasks = sample_tasks;
+    model.task_count = 6;
+    model.task_selected = 4;
+    model.task_active = 0;
+    model.tasks_status = "";
+    preview_set_time(2700);
+    ui_render(&model);
+    write_document("09-tasks-scrolled", "tasks / windowed past the top of the list");
+
+    /* Task manager, discovery failed */
     base_model(&model);
     model.screen = UI_SCREEN_SESSIONS;
     model.agent_state = "connecting";
@@ -321,13 +387,16 @@ int main(void)
     model.detail = "Session request failed: connection refused";
     model.detail_secondary = "";
     model.link_state = "retrying";
-    model.sessions_retryable = true;
-    model.sessions_status = "Session request failed: connection refused";
+    model.tasks = NULL;
+    model.task_count = 0;
+    model.task_active_valid = false;
+    model.tasks_retryable = true;
+    model.tasks_status = "Session request failed: connection refused";
     preview_set_time(3000);
     ui_render(&model);
-    write_document("08-sessions-error", "task chooser / bridge unreachable");
+    write_document("10-tasks-error", "tasks / bridge unreachable");
 
-    /* Idle with a completed response */
+    /* Idle with a completed response and one quiet task */
     base_model(&model);
     model.prompt = "why does the push cursor skip an event after a reconnect?";
     model.response = idle_response;
@@ -339,7 +408,31 @@ int main(void)
     model.diff_deletions = 12;
     preview_set_time(4200);
     ui_render(&model);
-    write_document("09-idle", "main / completed turn with a diff summary");
+    write_document("11-idle", "main / completed turn, single task");
+
+    /*
+     * Idle inside a busy rail, scrolled back through a long answer: this is the
+     * state that has to show the rail, the scroll controls and the attention
+     * count at the same time without any of them fighting.
+     */
+    base_model(&model);
+    model.prompt = "why does the push cursor skip an event after a reconnect?";
+    model.response = long_response;
+    model.view_state = "Response complete";
+    model.detail = "Command accepted in 38 ms";
+    model.detail_secondary = "Events: pushed link ready";
+    model.tasks = sample_tasks;
+    model.task_count = 6;
+    model.task_active = 0;
+    model.task_selected = 0;
+    model.diff_known = true;
+    model.diff_files = 2;
+    model.diff_additions = 31;
+    model.diff_deletions = 12;
+    model.scroll_lines = 9;
+    preview_set_time(4600);
+    ui_render(&model);
+    write_document("12-idle-rail", "main / busy rail, scrolled back, scroll controls live");
 
     /* Streaming */
     base_model(&model);
@@ -350,9 +443,14 @@ int main(void)
     model.view_state = "Receiving response...";
     model.detail = "Command accepted in 41 ms";
     model.detail_secondary = "Events: pushed link ready";
+    model.tasks = sample_tasks;
+    model.task_count = 6;
+    model.task_active = 2;
+    model.task_selected = 2;
+    model.session_label = "protocol - version the capture envelope";
     preview_set_time(5600);
     ui_render(&model);
-    write_document("10-working", "main / agent working, response streaming");
+    write_document("13-working", "main / agent working, response streaming");
 
     /* Recording. Several frames prime the scrolling level history. */
     base_model(&model);
@@ -371,7 +469,7 @@ int main(void)
         preview_set_time(9000 + frame * 16);
         ui_render(&model);
     }
-    write_document("11-recording", "main / push-to-talk with a live level trace");
+    write_document("14-recording", "main / push-to-talk with a live level trace");
 
     /* Transcript review */
     base_model(&model);
@@ -384,7 +482,7 @@ int main(void)
     model.detail = "Held 7420 ms; captured 7380 ms (241664 bytes)";
     preview_set_time(11000);
     ui_render(&model);
-    write_document("12-transcript", "main / review the transcript before sending");
+    write_document("15-transcript", "main / review the transcript before sending");
 
     /* Approval */
     base_model(&model);
@@ -399,7 +497,41 @@ int main(void)
     model.detail = "Command accepted in 44 ms";
     preview_set_time(12600);
     ui_render(&model);
-    write_document("13-approval", "main / approval required");
+    write_document("16-approval", "main / approval required");
+
+    /* Approval with the approve button under a finger */
+    base_model(&model);
+    model.prompt = "fix the cursor ordering and add a regression test";
+    model.response = working_response;
+    model.agent_state = "waiting_for_user";
+    model.turn_active = true;
+    model.approval_pending = true;
+    model.approval_summary =
+        "Run `npm test -- push-server` in /Users/jm/Projects/3gent/bridge";
+    model.view_state = "Approval required";
+    model.detail = "Command accepted in 44 ms";
+    model.tasks = sample_tasks;
+    model.task_count = 6;
+    model.task_active = 1;
+    model.task_selected = 1;
+    model.session_label = "bridge - bound the replay window";
+    model.touch_down = true;
+    model.touch_x = 80;
+    model.touch_y = 175;
+    preview_set_time(12900);
+    ui_render(&model);
+    write_document("17-approval-touch", "main / approving by stylus");
+
+    /* Microphone unavailable, so the only input left is the keyboard */
+    base_model(&model);
+    model.microphone_ready = false;
+    model.response = "";
+    model.view_state = "Ready";
+    model.detail = "Microphone service unavailable";
+    model.detail_secondary = "";
+    preview_set_time(13400);
+    ui_render(&model);
+    write_document("18-no-mic", "main / empty task with no microphone");
 
     /* Photo review */
     base_model(&model);
@@ -412,7 +544,19 @@ int main(void)
     ui_photo_preview_set(photo, 400, 240);
     preview_set_time(14000);
     ui_render(&model);
-    write_document("14-photo", "camera / review before attaching");
+    write_document("19-photo", "camera / review before attaching");
+
+    /* Photo upload */
+    base_model(&model);
+    model.screen = UI_SCREEN_PHOTO;
+    model.view_state = "Uploading photo";
+    model.detail = "POST /v1/sessions/.../captures/photo";
+    model.detail_secondary = "";
+    model.photo_caption = "Uploading 192000 bytes";
+    model.photo_progress_percent = 64;
+    preview_set_time(14600);
+    ui_render(&model);
+    write_document("20-photo-upload", "camera / bounded upload in progress");
     ui_photo_preview_clear();
 
     write_index();

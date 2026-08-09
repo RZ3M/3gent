@@ -11,6 +11,10 @@
  * every pixel drawn on both screens. It never touches the network, the
  * microphone, or the camera: `main.c` fills a `UiModel` each frame and the
  * renderer reads it.
+ *
+ * It also owns touch geometry. `ui_hit_test` resolves a bottom-screen point to
+ * the same semantic action the renderer drew there, so a target can never drift
+ * away from the thing it looks like.
  */
 
 typedef enum {
@@ -31,7 +35,49 @@ typedef enum {
     UI_PAIRING_FAILED,
 } UiPairingPhase;
 
+/* What a task is doing, as far as the handheld last heard. */
+typedef enum {
+    UI_TASK_IDLE = 0,
+    UI_TASK_WORKING,
+    UI_TASK_ATTENTION, /* blocked on the user: an approval is waiting */
+    UI_TASK_FAILED,
+    UI_TASK_UNKNOWN,
+} UiTaskState;
+
+typedef struct {
+    const char *label;
+    UiTaskState state;
+    /* Output arrived while the user was looking at a different task. */
+    bool unread;
+} UiTask;
+
 #define UI_PHOTO_PROGRESS_NONE 0xFFFFFFFFu
+
+/*
+ * Semantic result of touching the bottom screen. Every action a finger can
+ * reach is also on a button, so `main.c` folds a hit back into the button it
+ * stands for and keeps one handler per action.
+ */
+typedef enum {
+    UI_HIT_NONE = 0,
+    UI_HIT_PRIMARY,       /* A */
+    UI_HIT_SECONDARY,     /* X */
+    UI_HIT_TERTIARY,      /* Y */
+    UI_HIT_BACK,          /* B */
+    UI_HIT_PHOTO,         /* L */
+    UI_HIT_TALK,          /* hold R; held for as long as the finger stays down */
+    UI_HIT_TASK,          /* switch to `index` in the task rail */
+    UI_HIT_TASK_LIST,     /* open the task manager */
+    UI_HIT_MENU_ROW,      /* choose row `index` of the on-screen list */
+    UI_HIT_SCROLL_BACK,   /* one page further back through the response */
+    UI_HIT_SCROLL_FORWARD,
+    UI_HIT_SCROLL_LATEST,
+} UiHitKind;
+
+typedef struct {
+    UiHitKind kind;
+    size_t index;
+} UiHit;
 
 typedef struct {
     UiScreen screen;
@@ -78,13 +124,19 @@ typedef struct {
     unsigned int diff_additions;
     unsigned int diff_deletions;
 
-    /* Task chooser */
-    const char *const *session_labels;
-    size_t session_count;
-    size_t session_selected;
-    bool sessions_loading;
-    bool sessions_retryable;
-    const char *sessions_status;
+    /*
+     * Tasks. `task_active` is the one being read; `task_selected` is the one
+     * highlighted in the manager. They are the same index while the manager is
+     * open on the current task, and differ as soon as the user moves.
+     */
+    const UiTask *tasks;
+    size_t task_count;
+    size_t task_selected;
+    size_t task_active;
+    bool task_active_valid;
+    bool tasks_loading;
+    bool tasks_retryable;
+    const char *tasks_status;
 
     /* Photo review */
     const char *photo_caption;
@@ -107,6 +159,11 @@ typedef struct {
     const char *pairing_message;
     const char *pairing_bridge;
     unsigned int pairing_frames_examined;
+
+    /* Touch, for drawing the pressed target the finger is on. */
+    bool touch_down;
+    unsigned int touch_x;
+    unsigned int touch_y;
 } UiModel;
 
 bool ui_initialize(char *error, size_t error_capacity);
@@ -121,6 +178,16 @@ void ui_render(const UiModel *model);
  * disagree with what is on screen.
  */
 size_t ui_max_scroll(const UiModel *model);
+
+/* Lines of response text visible at once, for page-sized scroll steps. */
+size_t ui_page_lines(const UiModel *model);
+
+/*
+ * Resolves a bottom-screen point to the action drawn there. Pure: it reads the
+ * same model the frame was drawn from and shares the renderer's layout, so it
+ * cannot report a target the user cannot see.
+ */
+UiHit ui_hit_test(const UiModel *model, unsigned int x, unsigned int y);
 
 /* Uploads an RGB565 image for UI_SCREEN_PHOTO. */
 bool ui_photo_preview_set(
