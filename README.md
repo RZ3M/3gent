@@ -87,6 +87,18 @@ button chips, and a GPU-textured camera review. Rendering lives in
 lets `tools/ui-preview/` compile that same file on a laptop and emit every
 interface state as SVG for review before a hardware run.
 
+Version `0.8.0-pairing` adds the start screen and QR pairing (Stage 4, ADR-0003).
+The handheld no longer dials a compile-time address: it pairs with a machine by
+scanning the QR code the bridge prints, or by typing the same values, and saves
+a revocable device key on the SD card. The bootstrap carries an endpoint and a
+single-use expiring code, never a credential, and the bridge stores only a hash
+of the key it issues. The bridge generates the QR itself with no runtime
+dependency, and `tools/qr-check/` decodes that output using the same vendored
+quirc build that runs on the device, so encoder and decoder are proved
+compatible without a hardware run. Requiring the device key is available
+(`--require-pairing`) but off by default while the transport is still plaintext;
+see D-022.
+
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 device notes. The exhaustive functional-core physical procedure is
 [`docs/HARDWARE_TEST_CHECKLIST.md`](docs/HARDWARE_TEST_CHECKLIST.md). See
@@ -149,7 +161,7 @@ Codex supports repository-level `AGENTS.md` instructions, so this repo uses `AGE
 
 ## Current phase
 
-**Functional-core hardware-test build (Stages 2, 3, 5 and 6).**
+**Functional-core hardware-test build (Stages 2, 3, 4, 5 and 6).**
 
 The fake-agent and local pushed-control loops remain available as deterministic
 fixtures. The bridge now launches the supported local stdio Codex app-server,
@@ -158,9 +170,10 @@ state, diffs, errors and approvals, and keeps Codex wire objects off the 3DS.
 Voice transcription supports a local command or OpenAI-compatible backend with
 explicit transcript review. A self-hosted reverse relay now carries both
 directions plus media for remote testing, and 400×240 camera photos can be
-previewed, uploaded and attached to the next Codex prompt. QR pairing, device
-credentials and production TLS are intentionally outside this user-requested
-no-security hardware-test build.
+previewed, uploaded and attached to the next Codex prompt. QR pairing and
+revocable device credentials are implemented and awaiting a physical scan test.
+Production TLS, mandatory credentials and pairing through the relay remain
+outside this build.
 
 ## License status
 

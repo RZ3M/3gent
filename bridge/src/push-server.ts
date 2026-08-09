@@ -127,7 +127,11 @@ class PushConnection {
       return;
     }
     if (parsed.type !== "ping" || this.#verboseHeartbeats) {
-      this.#debug(`3DS -> bridge push ${JSON.stringify(parsed)}`);
+      /* A hello carries the device token; it must never reach a log. */
+      const loggable = parsed.deviceToken === undefined
+        ? parsed
+        : {...parsed, deviceToken: "[redacted]"};
+      this.#debug(`3DS -> bridge push ${JSON.stringify(loggable)}`);
     }
 
     try {
@@ -171,6 +175,10 @@ class PushConnection {
     if (typeof sessionId !== "string" || !isIdentifier(sessionId, "ses")) {
       throw new ProtocolError(400, "INVALID_SESSION_ID", "hello requires a valid session ID");
     }
+    /* One authorisation rule for both transports; see BridgeApplication. */
+    this.#application.authorizeToken(
+      typeof frame.deviceToken === "string" ? frame.deviceToken : null,
+    );
     if (!Number.isSafeInteger(after) || (after as number) < 0) {
       throw new ProtocolError(400, "INVALID_CURSOR", "hello requires a non-negative event cursor");
     }

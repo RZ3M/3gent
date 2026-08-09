@@ -12,6 +12,14 @@ typedef enum {
 } NetworkOperationStatus;
 
 bool network_start(char *error, size_t error_capacity);
+
+/*
+ * Sets the paired device credential. When present it is sent as an
+ * `Authorization: Bearer` header on every HTTP request and in the pushed
+ * control hello. Pass NULL or "" to send nothing, which is what an unpaired
+ * development build does.
+ */
+bool network_set_device_token(const char *token);
 bool network_prepare_connections(
     const char *host,
     unsigned short port,
@@ -19,6 +27,14 @@ bool network_prepare_connections(
     size_t error_capacity
 );
 unsigned int network_warm_connection_count(void);
+
+/*
+ * Drops every pooled socket. Warm connections are keyed to nothing but their
+ * own liveness, so they must be discarded whenever the active endpoint changes
+ * — otherwise a request for the newly paired machine would be written down the
+ * connection opened to the previous one.
+ */
+void network_reset_connections(void);
 void network_stop(void);
 
 /*

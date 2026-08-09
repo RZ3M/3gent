@@ -66,6 +66,32 @@ Animation is derived from `osGetTime()`, so it is frame-rate independent:
 
 ## 4. Screen roles
 
+### Start screen
+
+The application opens on the start screen, not on a connection attempt. The top
+screen states the one fact that decides everything else — whether a machine is
+paired, and which — and the bottom screen is a five-row menu: connect, pair by
+QR, pair by typed code, forget this machine, exit.
+
+Every row carries its own one-line explanation, so this screen has no chip grid;
+five rows plus chips do not fit, and the rows already teach what they do.
+"Forget this machine" is dimmed rather than hidden when nothing is paired, which
+matches how unavailable actions are treated everywhere else.
+
+`START` in the agent loop returns here rather than quitting. Leaving a machine
+is a more common intent than leaving the application.
+
+### Pairing screen
+
+Full-bleed viewfinder with corner brackets rather than a full frame: the
+brackets mark the target without covering the code the user is trying to fill
+them with. A counter shows how many frames have actually been examined, so a
+decoder that is working but not yet succeeding does not look like a frozen one.
+
+Decoding, exchanging, success and failure each replace the viewfinder with the
+same attention card the approval and transcript flows use. Failure is always
+recoverable in place: rescan, type the code by hand, or go back.
+
 ### Top screen — read surface
 
 400×240, three bands:
@@ -109,7 +135,11 @@ Current build:
 - hold `R`: push-to-talk;
 - `L`: capture a photo for the next prompt;
 - D-pad/Circle Pad Up/Down: scroll, including held repeat;
-- `START`: exit.
+- `START`: back to the start screen.
+
+On the start screen: Up/Down choose, `A` selects, `START` exits.
+On the pairing screen: `Y` switches to typing the code, `B` cancels, and `A`
+rescans after a failure or continues after a success.
 
 Approval ergonomics are still pending usability testing. The approve action is
 deliberately not on `A`, and it is drawn as a distinct two-button choice rather
@@ -141,8 +171,12 @@ the two choices as separate buttons with their key caps.
 
 ## 9. Camera and QR
 
-Pairing (future): desktop shows QR, camera view opens, immediate success/failure,
-manual fallback remains available.
+Implemented pairing: the bridge prints a QR code (and an SVG for a brighter,
+larger target), the handheld opens a viewfinder, and the outcome is immediate
+and named. Decoding runs on a worker thread so the viewfinder never stalls. The
+typed fallback is one keyboard prompt taking the four values the bridge printed,
+and it also accepts a pasted `3gent://pair?...` URL, so a user who reaches for
+the wrong entry point still succeeds.
 
 Implemented photo capture: shoot, review full-screen with a caption scrim,
 attach with `A` or discard with `B`, then a bounded upload with a progress bar.

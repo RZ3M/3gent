@@ -15,10 +15,21 @@
 
 typedef enum {
     UI_SCREEN_BOOT = 0,
+    UI_SCREEN_HOME,
+    UI_SCREEN_PAIRING,
     UI_SCREEN_SESSIONS,
     UI_SCREEN_MAIN,
     UI_SCREEN_PHOTO,
 } UiScreen;
+
+/* Phases of the pairing screen, in the order the user meets them. */
+typedef enum {
+    UI_PAIRING_AIMING = 0,
+    UI_PAIRING_DECODED,
+    UI_PAIRING_EXCHANGING,
+    UI_PAIRING_SUCCEEDED,
+    UI_PAIRING_FAILED,
+} UiPairingPhase;
 
 #define UI_PHOTO_PROGRESS_NONE 0xFFFFFFFFu
 
@@ -78,6 +89,24 @@ typedef struct {
     /* Photo review */
     const char *photo_caption;
     unsigned int photo_progress_percent;
+
+    /* Start screen */
+    const char *const *menu_labels;
+    const char *const *menu_hints;
+    const bool *menu_enabled;
+    size_t menu_count;
+    size_t menu_selected;
+    bool paired;
+    const char *paired_bridge;
+    const char *paired_endpoint;
+    const char *paired_since;
+
+    /* Pairing */
+    UiPairingPhase pairing_phase;
+    bool pairing_preview_ready;
+    const char *pairing_message;
+    const char *pairing_bridge;
+    unsigned int pairing_frames_examined;
 } UiModel;
 
 bool ui_initialize(char *error, size_t error_capacity);

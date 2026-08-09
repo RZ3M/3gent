@@ -2,6 +2,8 @@
 #include "camera_capture.h"
 #include "microphone.h"
 #include "network.h"
+#include "pairing.h"
+#include "qr_scanner.h"
 #include "ui.h"
 
 #include <3ds.h>
@@ -11,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define SCROLL_REPEAT_DELAY_FRAMES 18
 #define SCROLL_REPEAT_INTERVAL_FRAMES 4
@@ -77,6 +80,52 @@ static unsigned int diff_additions;
 static unsigned int diff_deletions;
 static UiScreen current_screen = UI_SCREEN_BOOT;
 
+/*
+ * The endpoint is runtime state, not a build constant. A paired machine
+ * supplies it; the compile-time SERVER_HOST remains as the development
+ * fallback so an unpaired build still behaves the way it did before.
+ */
+static PairingRecord pairing_record;
+static char active_host[PAIRING_HOST_CAPACITY] = THREEGENT_SERVER_HOST;
+static unsigned short active_port = THREEGENT_SERVER_PORT;
+static unsigned short active_push_port = THREEGENT_PUSH_PORT;
+static char pairing_message[160];
+static char pairing_bridge_line[96];
+static char paired_endpoint_line[80];
+static char paired_since_line[64];
+static UiPairingPhase pairing_phase;
+static bool pairing_preview_ready;
+
+/* Start-screen menu. The order is fixed so HomeAction can index it directly. */
+typedef enum {
+    HOME_CONNECT = 0,
+    HOME_PAIR_QR,
+    HOME_PAIR_MANUAL,
+    HOME_FORGET,
+    HOME_EXIT,
+    HOME_MENU_COUNT,
+} HomeAction;
+
+static char home_connect_hint[96];
+static const char *home_menu_labels[HOME_MENU_COUNT] = {
+    "Connect",
+    "Pair with a QR code",
+    "Enter a pairing code",
+    "Forget this machine",
+    "Exit",
+};
+static const char *home_menu_hints[HOME_MENU_COUNT] = {
+    "",
+    "Scan the code your bridge prints",
+    "Type the address and code by hand",
+    "Delete the device key saved on the SD card",
+    "Close 3gent",
+};
+static bool home_menu_enabled[HOME_MENU_COUNT] = {
+    true, true, true, false, true,
+};
+static size_t menu_selected;
+
 static void set_view_state(const char *state)
 {
     snprintf(view_state, sizeof(view_state), "%s", state);
@@ -130,7 +179,9 @@ static const char *primary_detail(void)
         );
         return scratch;
     }
-    if (current_screen == UI_SCREEN_PHOTO && camera_detail[0] != '\0') {
+    const bool camera_screen = current_screen == UI_SCREEN_PHOTO
+        || current_screen == UI_SCREEN_PAIRING;
+    if (camera_screen && camera_detail[0] != '\0') {
         return camera_detail;
     }
     if (network_detail[0] != '\0') {
@@ -157,8 +208,8 @@ static void build_model(UiModel *model)
     model->screen = current_screen;
     model->version = THREEGENT_APP_VERSION;
     model->session_label = current_session_label;
-    model->server_host = THREEGENT_SERVER_HOST;
-    model->server_port = (unsigned int)THREEGENT_SERVER_PORT;
+    model->server_host = active_host;
+    model->server_port = (unsigned int)active_port;
     model->network_ready = network_ready;
     model->audio_warm = network_warm_connection_count() > 0;
     model->microphone_ready = microphone_is_ready();
@@ -200,6 +251,22 @@ static void build_model(UiModel *model)
 
     model->photo_caption = photo_caption;
     model->photo_progress_percent = photo_progress_percent;
+
+    model->menu_labels = home_menu_labels;
+    model->menu_hints = home_menu_hints;
+    model->menu_enabled = home_menu_enabled;
+    model->menu_count = HOME_MENU_COUNT;
+    model->menu_selected = menu_selected;
+    model->paired = pairing_record.valid;
+    model->paired_bridge = pairing_record.bridge_name;
+    model->paired_endpoint = paired_endpoint_line;
+    model->paired_since = paired_since_line;
+
+    model->pairing_phase = pairing_phase;
+    model->pairing_preview_ready = pairing_preview_ready;
+    model->pairing_message = pairing_message;
+    model->pairing_bridge = pairing_bridge_line;
+    model->pairing_frames_examined = qr_scanner_frames_examined();
 }
 
 static void render_frame(void)
@@ -368,8 +435,8 @@ static bool wait_for_control_request(const char *status)
 static bool load_session_choices(void)
 {
     if (!network_control_begin_get(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
+            active_host,
+            active_port,
             "/v1/sessions?limit=6",
             network_detail,
             sizeof(network_detail)
@@ -422,8 +489,8 @@ static bool start_new_session(void)
 {
     const char body[] = "{}";
     if (!network_control_begin_post(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
+            active_host,
+            active_port,
             "/v1/sessions",
             "application/json",
             body,
@@ -467,8 +534,8 @@ static bool resume_session(size_t selected)
     char path[112];
     snprintf(path, sizeof(path), "/v1/sessions/%s/resume", session_ids[selected]);
     if (!network_control_begin_post(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
+            active_host,
+            active_port,
             path,
             "application/json",
             NULL,
@@ -561,6 +628,540 @@ static bool choose_session(void)
         render_frame();
     }
     return false;
+}
+
+/* ---------------------------------------------------------------- pairing -- */
+
+static void set_pairing_message(const char *format, ...)
+{
+    va_list arguments;
+    va_start(arguments, format);
+    vsnprintf(pairing_message, sizeof(pairing_message), format, arguments);
+    va_end(arguments);
+}
+
+/*
+ * Points every later request at `record`'s machine. Pooled sockets belong to
+ * the previous endpoint, so they go first.
+ */
+static void apply_pairing(const PairingRecord *record)
+{
+    network_reset_connections();
+    if (record != NULL && record->valid) {
+        pairing_record = *record;
+        snprintf(active_host, sizeof(active_host), "%s", record->host);
+        active_port = record->http_port;
+        active_push_port = record->push_port;
+        network_set_device_token(record->token);
+    } else {
+        memset(&pairing_record, 0, sizeof(pairing_record));
+        snprintf(active_host, sizeof(active_host), "%s", THREEGENT_SERVER_HOST);
+        active_port = THREEGENT_SERVER_PORT;
+        active_push_port = THREEGENT_PUSH_PORT;
+        network_set_device_token(NULL);
+    }
+
+    snprintf(
+        paired_endpoint_line,
+        sizeof(paired_endpoint_line),
+        "%s  port %u  push %u",
+        active_host,
+        (unsigned int)active_port,
+        (unsigned int)active_push_port
+    );
+    if (pairing_record.valid) {
+        snprintf(
+            paired_since_line,
+            sizeof(paired_since_line),
+            "paired %.10s  key %s",
+            pairing_record.paired_at[0] != '\0' ? pairing_record.paired_at : "recently",
+            pairing_record.device_id
+        );
+        snprintf(
+            home_connect_hint,
+            sizeof(home_connect_hint),
+            "%s at %s:%u",
+            pairing_record.bridge_name,
+            active_host,
+            (unsigned int)active_port
+        );
+    } else {
+        paired_since_line[0] = '\0';
+        snprintf(
+            home_connect_hint,
+            sizeof(home_connect_hint),
+            "development host %s:%u",
+            active_host,
+            (unsigned int)active_port
+        );
+    }
+    home_menu_hints[HOME_CONNECT] = home_connect_hint;
+    home_menu_enabled[HOME_FORGET] = pairing_record.valid;
+}
+
+/* The bridge lists this beside the device key, so make it identifiable. */
+static const char *handheld_display_name(void)
+{
+    static char name[40];
+    if (name[0] != '\0') {
+        return name;
+    }
+    snprintf(name, sizeof(name), "Nintendo 3DS");
+    if (R_FAILED(cfguInit())) {
+        return name;
+    }
+    u8 model = 0;
+    if (R_SUCCEEDED(CFGU_GetSystemModel(&model))) {
+        static const char *const models[] = {
+            "Old 3DS", "Old 3DS XL", "New 3DS", "2DS", "New 3DS XL", "New 2DS XL",
+        };
+        if (model < sizeof(models) / sizeof(models[0])) {
+            snprintf(name, sizeof(name), "%s", models[model]);
+        }
+    }
+    cfguExit();
+    return name;
+}
+
+/* Renders the pairing screen while the exchange request is in flight. */
+static bool pairing_wait_for_control(void)
+{
+    render_frame();
+    while (aptMainLoop()) {
+        hidScanInput();
+        if ((hidKeysDown() & (KEY_B | KEY_START)) != 0) {
+            network_control_cancel();
+            set_pairing_message("Pairing was cancelled before the bridge replied");
+            return false;
+        }
+        network_pump();
+        const NetworkOperationStatus operation = network_control_status();
+        if (operation == NETWORK_OPERATION_SUCCEEDED) {
+            return true;
+        }
+        if (operation == NETWORK_OPERATION_FAILED) {
+            set_pairing_message("%.140s", network_control_error());
+            network_control_consume();
+            return false;
+        }
+        render_frame();
+    }
+    network_control_cancel();
+    return false;
+}
+
+/*
+ * Exchanges the one-time bootstrap for a revocable device key and stores it.
+ * The bootstrap itself is never written to the SD card.
+ */
+static bool pairing_exchange(const PairingBootstrap *bootstrap)
+{
+    char body[224];
+    const int body_size = snprintf(
+        body,
+        sizeof(body),
+        "{\"code\":\"%s\",\"deviceName\":\"%s\"}",
+        bootstrap->code,
+        handheld_display_name()
+    );
+    if (body_size < 0 || (size_t)body_size >= sizeof(body)) {
+        set_pairing_message("That pairing code is too long to send");
+        return false;
+    }
+
+    pairing_phase = UI_PAIRING_EXCHANGING;
+    snprintf(
+        pairing_bridge_line,
+        sizeof(pairing_bridge_line),
+        "%s at %s:%u",
+        bootstrap->bridge_name,
+        bootstrap->host,
+        (unsigned int)bootstrap->http_port
+    );
+    set_pairing_message("Asking %s to pair...", bootstrap->bridge_name);
+    set_view_state("Pairing...");
+
+    /* The bootstrap endpoint is a different machine from any current pairing. */
+    network_reset_connections();
+    if (!network_control_begin_post(
+            bootstrap->host,
+            bootstrap->http_port,
+            "/v1/pair",
+            "application/json",
+            body,
+            (size_t)body_size,
+            pairing_message,
+            sizeof(pairing_message)
+        ) || !pairing_wait_for_control()) {
+        return false;
+    }
+
+    const unsigned int status = network_control_http_status();
+    if (status != 201 && status != 200) {
+        char code[48] = "";
+        json_read_string(network_control_response(), "message", code, sizeof(code));
+        set_pairing_message(
+            "%s",
+            code[0] != '\0' ? code : "The bridge refused this pairing code"
+        );
+        network_control_consume();
+        return false;
+    }
+
+    PairingRecord record;
+    memset(&record, 0, sizeof(record));
+    const char *response_body = network_control_response();
+    const bool parsed = json_read_string(
+            response_body,
+            "deviceToken",
+            record.token,
+            sizeof(record.token)
+        ) && json_read_string(
+            response_body,
+            "deviceId",
+            record.device_id,
+            sizeof(record.device_id)
+        );
+    unsigned int http_port = bootstrap->http_port;
+    unsigned int push_port = bootstrap->push_port;
+    json_read_unsigned(response_body, "httpPort", &http_port);
+    json_read_unsigned(response_body, "pushPort", &push_port);
+    if (!json_read_string(response_body, "host", record.host, sizeof(record.host))) {
+        snprintf(record.host, sizeof(record.host), "%s", bootstrap->host);
+    }
+    if (!json_read_string(
+            response_body,
+            "bridgeName",
+            record.bridge_name,
+            sizeof(record.bridge_name)
+        )) {
+        snprintf(record.bridge_name, sizeof(record.bridge_name), "%s", bootstrap->bridge_name);
+    }
+    network_control_consume();
+
+    if (!parsed || http_port == 0 || http_port > 65535u
+        || push_port == 0 || push_port > 65535u) {
+        set_pairing_message("The bridge sent a pairing reply I could not read");
+        return false;
+    }
+    record.http_port = (unsigned short)http_port;
+    record.push_port = (unsigned short)push_port;
+
+    time_t now = time(NULL);
+    struct tm calendar;
+    if (gmtime_r(&now, &calendar) != NULL) {
+        strftime(record.paired_at, sizeof(record.paired_at), "%Y-%m-%d", &calendar);
+    }
+    record.valid = true;
+
+    /*
+     * The bridge has issued the credential, so this run is paired either way.
+     * A failed write only means it will not survive a relaunch, and saying
+     * "not paired" here would contradict what the user can go on to do.
+     */
+    char save_error[96] = "";
+    const bool saved = pairing_save(&record, save_error, sizeof(save_error));
+    apply_pairing(&record);
+    pairing_phase = UI_PAIRING_SUCCEEDED;
+    snprintf(
+        pairing_bridge_line,
+        sizeof(pairing_bridge_line),
+        "%s at %s:%u",
+        record.bridge_name,
+        record.host,
+        (unsigned int)record.http_port
+    );
+    if (saved) {
+        set_pairing_message("Paired with %s", record.bridge_name);
+        set_view_state("Paired");
+    } else {
+        set_pairing_message(
+            "Paired with %s, but the key was not saved: %.80s",
+            record.bridge_name,
+            save_error
+        );
+        set_view_state("Paired for this session only");
+    }
+    return true;
+}
+
+/* Waits on the pairing screen so the outcome is readable before moving on. */
+static void pairing_acknowledge(void)
+{
+    render_frame();
+    while (aptMainLoop()) {
+        hidScanInput();
+        const u32 keys = hidKeysDown();
+        if ((keys & (KEY_A | KEY_B | KEY_START)) != 0) {
+            return;
+        }
+        network_pump();
+        render_frame();
+    }
+}
+
+/* `cancelled` separates "the user backed out" from "that code was unusable". */
+static bool read_pairing_code_by_hand(
+    PairingBootstrap *bootstrap,
+    bool *cancelled
+)
+{
+    static char typed[128];
+    SwkbdState keyboard;
+    *cancelled = false;
+    swkbdInit(&keyboard, SWKBD_TYPE_NORMAL, 2, (int)sizeof(typed) - 1);
+    swkbdSetInitialText(&keyboard, typed);
+    swkbdSetHintText(&keyboard, "host port pushport code");
+    swkbdSetButton(&keyboard, SWKBD_BUTTON_LEFT, "Cancel", false);
+    swkbdSetButton(&keyboard, SWKBD_BUTTON_RIGHT, "Pair", true);
+    swkbdSetValidation(&keyboard, SWKBD_NOTEMPTY_NOTBLANK, 0, 0);
+
+    if (swkbdInputText(&keyboard, typed, sizeof(typed)) != SWKBD_BUTTON_RIGHT) {
+        *cancelled = true;
+        return false;
+    }
+    return pairing_parse_manual(
+        typed,
+        bootstrap,
+        pairing_message,
+        sizeof(pairing_message)
+    );
+}
+
+static bool run_manual_pairing(void)
+{
+    current_screen = UI_SCREEN_PAIRING;
+    pairing_preview_ready = false;
+    pairing_phase = UI_PAIRING_DECODED;
+    set_pairing_message("Type the four values the bridge printed");
+    set_view_state("Enter a pairing code");
+
+    PairingBootstrap bootstrap;
+    bool cancelled = false;
+    if (!read_pairing_code_by_hand(&bootstrap, &cancelled)) {
+        if (cancelled) {
+            set_view_state("Pairing cancelled");
+            return false;
+        }
+        pairing_phase = UI_PAIRING_FAILED;
+        set_view_state("That code could not be read");
+        pairing_acknowledge();
+        return false;
+    }
+    if (!pairing_exchange(&bootstrap)) {
+        pairing_phase = UI_PAIRING_FAILED;
+        set_view_state("Pairing failed");
+        pairing_acknowledge();
+        return false;
+    }
+    pairing_acknowledge();
+    return true;
+}
+
+/*
+ * The viewfinder loop. Camera delivery, QR decoding and the network pump all
+ * advance once per frame; the decode itself runs on the worker thread, so a
+ * frame that takes hundreds of milliseconds to analyse never stalls this loop.
+ */
+static bool run_qr_pairing(void)
+{
+    current_screen = UI_SCREEN_PAIRING;
+    pairing_phase = UI_PAIRING_AIMING;
+    pairing_preview_ready = false;
+    set_pairing_message("Point the outer camera at the QR code");
+    set_view_state("Scanning for a QR code");
+    camera_detail[0] = '\0';
+    render_frame();
+
+    u8 *frame = malloc(THREEGENT_PHOTO_BYTES);
+    if (frame == NULL) {
+        pairing_phase = UI_PAIRING_FAILED;
+        set_pairing_message("Not enough memory to open the camera");
+        set_view_state("Camera error");
+        pairing_acknowledge();
+        return false;
+    }
+
+    if (!camera_capture_initialize(camera_detail, sizeof(camera_detail))
+        || !camera_capture_stream_begin(
+            frame,
+            THREEGENT_PHOTO_BYTES,
+            camera_detail,
+            sizeof(camera_detail)
+        )
+        || !qr_scanner_begin(camera_detail, sizeof(camera_detail))) {
+        camera_capture_stream_end();
+        qr_scanner_end();
+        free(frame);
+        pairing_phase = UI_PAIRING_FAILED;
+        set_pairing_message("%.140s", camera_detail);
+        set_view_state("Camera error");
+        pairing_acknowledge();
+        return false;
+    }
+
+    bool paired = false;
+    bool retype = false;
+    bool cancelled = false;
+    unsigned int reported_recoveries = 0;
+    PairingBootstrap bootstrap;
+    while (aptMainLoop()) {
+        hidScanInput();
+        const u32 keys = hidKeysDown();
+        network_pump();
+
+        if ((keys & (KEY_B | KEY_START)) != 0) {
+            cancelled = true;
+            break;
+        }
+        if ((keys & KEY_Y) != 0) {
+            retype = true;
+            break;
+        }
+
+        bool frame_ready = false;
+        if (!camera_capture_stream_read(
+                &frame_ready,
+                camera_detail,
+                sizeof(camera_detail)
+            )) {
+            pairing_phase = UI_PAIRING_FAILED;
+            set_pairing_message("%.140s", camera_detail);
+            break;
+        }
+        if (frame_ready) {
+            /*
+             * The camera only writes while a transfer is armed, so the frame is
+             * ours until release: upload it and hand a copy to the decoder
+             * first, then ask for the next one.
+             */
+            pairing_preview_ready = ui_photo_preview_set(
+                frame,
+                THREEGENT_PHOTO_WIDTH,
+                THREEGENT_PHOTO_HEIGHT
+            );
+            qr_scanner_submit(frame, THREEGENT_PHOTO_WIDTH, THREEGENT_PHOTO_HEIGHT);
+            if (!camera_capture_stream_release(
+                    camera_detail,
+                    sizeof(camera_detail)
+                )) {
+                pairing_phase = UI_PAIRING_FAILED;
+                set_pairing_message("%.140s", camera_detail);
+                break;
+            }
+        }
+
+        const unsigned int recoveries = camera_capture_stream_recoveries();
+        if (recoveries != reported_recoveries) {
+            reported_recoveries = recoveries;
+            snprintf(
+                camera_detail,
+                sizeof(camera_detail),
+                "Camera restarted %u time%s after a stall",
+                recoveries,
+                recoveries == 1 ? "" : "s"
+            );
+        }
+
+        const char *payload = qr_scanner_take_payload();
+        if (payload != NULL) {
+            if (pairing_parse_url(
+                    payload,
+                    &bootstrap,
+                    pairing_message,
+                    sizeof(pairing_message)
+                )) {
+                pairing_phase = UI_PAIRING_DECODED;
+                break;
+            }
+            /* A stray QR code in view is not a failure; keep looking. */
+            set_view_state("That code is not from 3gent");
+        }
+
+        render_frame();
+    }
+
+    camera_capture_stream_end();
+    qr_scanner_end();
+    ui_photo_preview_clear();
+    pairing_preview_ready = false;
+    free(frame);
+
+    if (retype) {
+        return run_manual_pairing();
+    }
+    /* Backing out is a choice, not a failure; do not report it as one. */
+    if (cancelled) {
+        set_view_state("Pairing cancelled");
+        return false;
+    }
+    if (pairing_phase == UI_PAIRING_DECODED) {
+        paired = pairing_exchange(&bootstrap);
+    }
+    if (!paired) {
+        pairing_phase = UI_PAIRING_FAILED;
+        set_view_state("Not paired");
+    }
+    pairing_acknowledge();
+    return paired;
+}
+
+/* ------------------------------------------------------------- start screen -- */
+
+/* Returns the chosen action; HOME_EXIT also covers closing the application. */
+static HomeAction run_home_screen(void)
+{
+    current_screen = UI_SCREEN_HOME;
+    set_view_state(pairing_record.valid ? "Ready to connect" : "No machine paired");
+    snprintf(
+        network_detail,
+        sizeof(network_detail),
+        "%s",
+        pairing_record.valid
+            ? pairing_storage_path()
+            : "Pair with a machine, or use the built-in development host"
+    );
+    event_detail[0] = '\0';
+
+    while (aptMainLoop()) {
+        hidScanInput();
+        const u32 keys = hidKeysDown();
+        network_pump();
+
+        if ((keys & KEY_START) != 0) {
+            return HOME_EXIT;
+        }
+        if ((keys & KEY_UP) != 0) {
+            menu_selected = menu_selected == 0
+                ? HOME_MENU_COUNT - 1
+                : menu_selected - 1;
+        }
+        if ((keys & KEY_DOWN) != 0) {
+            menu_selected = (menu_selected + 1) % HOME_MENU_COUNT;
+        }
+        if ((keys & KEY_A) != 0 && home_menu_enabled[menu_selected]) {
+            return (HomeAction)menu_selected;
+        }
+        render_frame();
+    }
+    return HOME_EXIT;
+}
+
+static void forget_pairing(void)
+{
+    char error[96] = "";
+    if (pairing_forget(error, sizeof(error))) {
+        apply_pairing(NULL);
+        snprintf(
+            network_detail,
+            sizeof(network_detail),
+            "Device key deleted. Revoke it on the bridge as well."
+        );
+        set_view_state("Machine forgotten");
+    } else {
+        snprintf(network_detail, sizeof(network_detail), "%.140s", error);
+        set_view_state("Could not forget");
+    }
 }
 
 /* --------------------------------------------------------- protocol events -- */
@@ -895,8 +1496,8 @@ static bool restart_push_link(void)
         return false;
     }
     if (!network_push_start(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_PUSH_PORT,
+            active_host,
+            active_push_port,
             current_session_id,
             event_cursor,
             network_detail,
@@ -1113,8 +1714,8 @@ static void begin_microphone_capture(void)
 
     microphone_link_started_ms = osGetTime();
     if (!network_audio_stream_begin(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
+            active_host,
+            active_port,
             audio_capture_path,
             network_detail,
             sizeof(network_detail)
@@ -1324,8 +1925,8 @@ static void capture_and_upload_photo(void)
     }
 
     if (!network_photo_upload_begin(
-            THREEGENT_SERVER_HOST,
-            THREEGENT_SERVER_PORT,
+            active_host,
+            active_port,
             photo_capture_path,
             camera_detail,
             sizeof(camera_detail)
@@ -1453,78 +2054,62 @@ static void handle_scroll_input(u32 keys_down, u32 keys_held)
     }
 }
 
-/* --------------------------------------------------------------------- main -- */
+/* ------------------------------------------------------------ connected run -- */
 
-int main(int argc, char **argv)
+/*
+ * Connects to the active machine and runs the agent loop until the user leaves.
+ * Everything before this point is endpoint selection; nothing after it knows or
+ * cares whether the endpoint came from a pairing or from the build constants.
+ */
+static void run_connected_session(void)
 {
-    (void)argc;
-    (void)argv;
-
-    char startup_error[96];
-    if (!ui_initialize(startup_error, sizeof(startup_error))) {
-        /*
-         * Without the renderer there is no way to report anything, so fall back
-         * to the text console purely to show why the GPU was unavailable.
-         */
-        gfxInitDefault();
-        consoleInit(GFX_TOP, NULL);
-        printf("3gent %s could not start.\n\n%s\n\nPress START to exit.\n",
-            THREEGENT_APP_VERSION, startup_error);
-        while (aptMainLoop()) {
-            hidScanInput();
-            if ((hidKeysDown() & KEY_START) != 0) {
-                break;
-            }
-            gspWaitForVBlank();
-        }
-        gfxExit();
-        return 1;
+    if (!network_ready) {
+        current_screen = UI_SCREEN_HOME;
+        set_view_state("No network");
+        return;
     }
 
-    network_ready = network_start(network_detail, sizeof(network_detail));
-    microphone_initialize(microphone_detail, sizeof(microphone_detail));
-    if (network_ready) {
-        set_view_state("Warming low-latency links...");
-        render_frame();
+    current_screen = UI_SCREEN_BOOT;
+    set_view_state("Warming low-latency links...");
+    render_frame();
 
-        u64 warmup_started_ms = osGetTime();
-        if (network_prepare_connections(
-                THREEGENT_SERVER_HOST,
-                THREEGENT_SERVER_PORT,
-                network_detail,
-                sizeof(network_detail)
-            )) {
-            snprintf(
-                network_detail,
-                sizeof(network_detail),
-                "Audio link ready in %u ms",
-                (unsigned int)(osGetTime() - warmup_started_ms)
-            );
-            set_view_state("Ready");
-        } else {
-            set_view_state("Server offline - retry action");
-        }
-        if (!choose_session()) {
-            microphone_shutdown();
-            network_stop();
-            ui_shutdown();
-            return 0;
-        }
+    const u64 warmup_started_ms = osGetTime();
+    if (network_prepare_connections(
+            active_host,
+            active_port,
+            network_detail,
+            sizeof(network_detail)
+        )) {
         snprintf(
-            audio_capture_path,
-            sizeof(audio_capture_path),
-            "/v1/sessions/%s/captures/audio",
-            current_session_id
+            network_detail,
+            sizeof(network_detail),
+            "Audio link ready in %u ms",
+            (unsigned int)(osGetTime() - warmup_started_ms)
         );
-        snprintf(
-            photo_capture_path,
-            sizeof(photo_capture_path),
-            "/v1/sessions/%s/captures/photo",
-            current_session_id
-        );
-        event_cursor = 0;
-        restart_push_link();
+        set_view_state("Ready");
+    } else {
+        set_view_state("Server offline - retry action");
     }
+
+    if (!choose_session()) {
+        network_reset_connections();
+        current_screen = UI_SCREEN_HOME;
+        return;
+    }
+    snprintf(
+        audio_capture_path,
+        sizeof(audio_capture_path),
+        "/v1/sessions/%s/captures/audio",
+        current_session_id
+    );
+    snprintf(
+        photo_capture_path,
+        sizeof(photo_capture_path),
+        "/v1/sessions/%s/captures/photo",
+        current_session_id
+    );
+    event_cursor = 0;
+    restart_push_link();
     current_screen = UI_SCREEN_MAIN;
 
     while (aptMainLoop()) {
@@ -1653,7 +2238,75 @@ int main(int argc, char **argv)
         render_frame();
     }
 
+    /* Leaving the agent loop returns to the start screen, not to the launcher. */
+    network_push_stop();
+    network_reset_connections();
+    turn_active = false;
+    transcript_ready = false;
+    pending_approval_id[0] = '\0';
+    pending_approval_summary[0] = '\0';
+    photo_pending = false;
+    clear_response();
+    prompt[0] = '\0';
+    session_count = 0;
+    current_session_id[0] = '\0';
+    current_session_label[0] = '\0';
+    snprintf(agent_state, sizeof(agent_state), "connecting");
+    current_screen = UI_SCREEN_HOME;
+}
+
+/* --------------------------------------------------------------------- main -- */
+
+int main(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+
+    char startup_error[96];
+    if (!ui_initialize(startup_error, sizeof(startup_error))) {
+        /*
+         * Without the renderer there is no way to report anything, so fall back
+         * to the text console purely to show why the GPU was unavailable.
+         */
+        gfxInitDefault();
+        consoleInit(GFX_TOP, NULL);
+        printf("3gent %s could not start.\n\n%s\n\nPress START to exit.\n",
+            THREEGENT_APP_VERSION, startup_error);
+        while (aptMainLoop()) {
+            hidScanInput();
+            if ((hidKeysDown() & KEY_START) != 0) {
+                break;
+            }
+            gspWaitForVBlank();
+        }
+        gfxExit();
+        return 1;
+    }
+
+    network_ready = network_start(network_detail, sizeof(network_detail));
+    microphone_initialize(microphone_detail, sizeof(microphone_detail));
+
+    PairingRecord saved;
+    apply_pairing(pairing_load(&saved) ? &saved : NULL);
+
+    while (aptMainLoop()) {
+        const HomeAction action = run_home_screen();
+        if (action == HOME_EXIT) {
+            break;
+        }
+        if (action == HOME_PAIR_QR) {
+            run_qr_pairing();
+        } else if (action == HOME_PAIR_MANUAL) {
+            run_manual_pairing();
+        } else if (action == HOME_FORGET) {
+            forget_pairing();
+        } else {
+            run_connected_session();
+        }
+    }
+
     camera_capture_shutdown();
+    qr_scanner_end();
     microphone_shutdown();
     network_stop();
     ui_shutdown();

@@ -3,6 +3,7 @@ import type { IncomingHttpHeaders, ServerResponse } from "node:http";
 export const PROTOCOL_VERSION = 1 as const;
 export const PROTOCOL_HEADER = "x-3gent-protocol-version";
 export const COMMAND_ID_HEADER = "x-3gent-command-id";
+export const AUTHORIZATION_HEADER = "authorization";
 export const MAX_TEXT_CAPTURE_BYTES = 4 * 1024;
 export const MAX_AUDIO_SECONDS = 5 * 60;
 export const AUDIO_SAMPLE_RATE = 16_364;
@@ -88,7 +89,17 @@ export class ProtocolError extends Error {
   }
 }
 
-const IDENTIFIER_PATTERN = /^(?:cmd|ses|evt|turn|cap|apr)_[A-Za-z0-9_-]+$/;
+const IDENTIFIER_PATTERN = /^(?:cmd|ses|evt|turn|cap|apr|dev)_[A-Za-z0-9_-]+$/;
+
+/** Extracts the device token from an `Authorization: Bearer ...` header. */
+export function readBearerToken(headers: IncomingHttpHeaders): string | null {
+  const value = headers[AUTHORIZATION_HEADER];
+  if (typeof value !== "string") {
+    return null;
+  }
+  const match = /^Bearer[ ]+([A-Za-z0-9._~+/-]+=*)$/.exec(value.trim());
+  return match?.[1] ?? null;
+}
 
 export function requireProtocolVersion(headers: IncomingHttpHeaders): void {
   const value = headers[PROTOCOL_HEADER];

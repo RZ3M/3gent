@@ -16,12 +16,14 @@ import {
   PROTOCOL_VERSION,
   ProtocolError,
   protocolErrorBody,
+  readBearerToken,
   requireCommandId,
   requireProtocolVersion,
   sendJson,
   type CommandAcknowledgement,
   type SessionSummary,
 } from "./protocol.js";
+import { MAX_DEVICE_NAME_BYTES, type PairingStore } from "./pairing.js";
 import { savePcmRequestAsWav } from "./wav.js";
 import type { Transcriber } from "./transcriber.js";
 import {
@@ -52,6 +54,8 @@ export interface BridgeServerOptions {
   defaultCwd?: string;
   transcriber?: Transcriber;
   photoPath?: string;
+  pairing?: PairingStore;
+  requirePairing?: boolean;
 }
 
 export interface CommandExecution {
@@ -74,6 +78,8 @@ export class BridgeApplication {
   readonly #transcriber: Transcriber | undefined;
   readonly #photoPath: string;
   readonly #pendingPhotos = new Map<string, string>();
+  readonly #pairing: PairingStore | undefined;
+  readonly #requirePairing: boolean;
   #audioCaptureActive = false;
   #photoCaptureActive = false;
 
@@ -86,6 +92,8 @@ export class BridgeApplication {
     this.#defaultCwd = options.defaultCwd ?? process.cwd();
     this.#transcriber = options.transcriber;
     this.#photoPath = options.photoPath ?? DEFAULT_PHOTO_PATH;
+    this.#pairing = options.pairing;
+    this.#requirePairing = options.requirePairing ?? false;
     this.adapter = options.adapter ?? new FakeAgentAdapter(
       this.events,
       options.fakeDeltaIntervalMs ?? 80,
@@ -116,6 +124,13 @@ export class BridgeApplication {
         throw new ProtocolError(404, "NOT_FOUND", "route not found");
       }
       requireProtocolVersion(request.headers);
+
+      /* Pairing is how a device earns a token, so it cannot require one. */
+      if (url.pathname === "/v1/pair" && request.method === "POST") {
+        await this.#pair(request, response);
+        return;
+      }
+      this.authorizeRequest(request.headers);
 
       if (url.pathname === "/v1/sessions" && request.method === "GET") {
         const limit = url.searchParams.has("limit")
@@ -267,6 +282,79 @@ export class BridgeApplication {
       [...this.#pendingPhotos.values()].map(async (path) => await this.#removePhoto(path)),
     );
     this.#pendingPhotos.clear();
+  }
+
+  /**
+   * Throws unless the caller presented a valid device token, when pairing is
+   * being enforced. Also used by the pushed-control server so both transports
+   * apply one rule.
+   */
+  public authorizeToken(token: string | null): void {
+    if (!this.#requirePairing) {
+      return;
+    }
+    const pairing = this.#pairing;
+    if (pairing === undefined) {
+      throw new ProtocolError(
+        503,
+        "PAIRING_UNAVAILABLE",
+        "the bridge requires pairing but has no device store",
+      );
+    }
+    if (token === null) {
+      throw new ProtocolError(401, "PAIRING_REQUIRED", "a paired device token is required");
+    }
+    const device = pairing.verifyToken(token);
+    if (device === null) {
+      throw new ProtocolError(401, "DEVICE_NOT_PAIRED", "device token is not recognised");
+    }
+  }
+
+  public authorizeRequest(headers: IncomingMessage["headers"]): void {
+    this.authorizeToken(readBearerToken(headers));
+  }
+
+  async #pair(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const pairing = this.#pairing;
+    if (pairing === undefined) {
+      throw new ProtocolError(
+        501,
+        "PAIRING_UNSUPPORTED",
+        "this bridge was started without a device store",
+      );
+    }
+    const body = await readJsonObject(request, 512);
+    const code = body.code;
+    if (typeof code !== "string" || code.length === 0 || code.length > 32) {
+      throw new ProtocolError(400, "INVALID_PAIRING_CODE", "a bounded pairing code is required");
+    }
+    const rawName = body.deviceName ?? "Nintendo 3DS";
+    if (typeof rawName !== "string"
+      || Buffer.byteLength(rawName, "utf8") > MAX_DEVICE_NAME_BYTES) {
+      throw new ProtocolError(400, "INVALID_DEVICE_NAME", "device name is invalid");
+    }
+    const {device, deviceToken, endpoint} = pairing.redeem(code, rawName);
+    /*
+     * Deliberately not this.#sendJson: that mirrors the body into the verbose
+     * log, and the device token must never reach a log file (SECURITY §10).
+     */
+    this.#verboseLog(`bridge -> 3DS 201 pairing response for ${device.deviceId} (token redacted)`);
+    sendJson(response, 201, {
+      protocolVersion: PROTOCOL_VERSION,
+      deviceId: device.deviceId,
+      deviceToken,
+      deviceName: device.name,
+      bridgeName: endpoint.bridgeName,
+      endpoint: {
+        host: endpoint.host,
+        httpPort: endpoint.httpPort,
+        pushPort: endpoint.pushPort,
+      },
+    });
+    this.#logger(
+      `paired device ${device.deviceId} (${device.name}); `
+      + `${pairing.deviceCount} device(s) now authorised`,
+    );
   }
 
   public session(sessionId: string) {

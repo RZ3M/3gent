@@ -50,6 +50,42 @@ The finalized WAV path is appended as the last argument. Stdout must contain
 only the transcript. It is bounded to 1,600 UTF-8 bytes for handheld review.
 The fake adapter uses a deterministic mock transcript unless overridden.
 
+## Pairing a handheld
+
+The 3DS learns which machine to talk to by pairing, not by being rebuilt. The
+bridge shows a pairing code automatically on a first run with nothing paired,
+and on demand:
+
+```sh
+npm start -- --host 0.0.0.0 --pair
+```
+
+That prints a QR code in the terminal, the same code as four typed values, and
+writes `data/pairing.svg` — open that full screen if the terminal QR is hard for
+the camera to resolve. The offer is single-use and expires after 180 seconds
+(`--pairing-ttl-seconds`).
+
+The advertised address is auto-detected from the first non-internal IPv4
+interface, because the bind address (`0.0.0.0`) is not something a 3DS can dial.
+Override it with `--advertise-host` on a multi-homed machine or behind a relay.
+
+Redeeming the code issues a revocable device token. Only its SHA-256 hash is
+stored, in `data/devices.json` (`--devices-path`):
+
+```sh
+npm start -- --list-devices
+npm start -- --revoke-device dev_5f2ac91b0e77d4a3
+```
+
+`--require-pairing` makes the token mandatory on every route except `/v1/pair`
+itself and on the pushed-control link. It is **off by default on purpose**: this
+transport is still plaintext, so requiring a bearer token would look like
+authentication without being it. See `docs/SECURITY.md` §4 and D-022.
+
+Useful extras: `--bridge-name` sets the name shown on the handheld (it defaults
+to the hostname), and `make -C tools/qr-check run` proves the generated QR
+decodes with the same library the 3DS uses.
+
 ## Self-hosted reverse relay
 
 The current remote test path is a bounded reverse TCP relay. It carries the

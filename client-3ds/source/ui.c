@@ -1580,7 +1580,7 @@ static void ui_render_bottom_main(const UiModel *model)
         },
         { "L", "Photo", free_to_act && !model->approval_pending },
         { "UD", "Scroll", true },
-        { "ST", "Exit", true },
+        { "ST", "Home", true },
     };
     ui_chip_grid(chips, 6);
     ui_bottom_bar(model);
@@ -1636,6 +1636,407 @@ static void ui_render_bottom_boot(const UiModel *model)
         C2D_AlignCenter,
         model->detail != NULL ? model->detail : ""
     );
+    ui_bottom_bar(model);
+}
+
+/* ----------------------------------------------------------- start screen -- */
+
+static void ui_render_top_home(const UiModel *model)
+{
+    ui_fill_vertical(0.0f, 0.0f, UI_TOP_W, UI_SCREEN_H, UI_BG1, UI_BG0);
+
+    const float center_x = UI_TOP_W / 2.0f;
+    ui_draw(center_x, 34.0f, 1.0f, UI_INK, C2D_AlignCenter, "3gent");
+    ui_accent_rule(center_x - 54.0f, 66.0f, 108.0f, 2.0f);
+    ui_draw(
+        center_x,
+        76.0f,
+        UI_SCALE_MICRO,
+        UI_INK_DIM,
+        C2D_AlignCenter,
+        "a pocket remote for coding agents"
+    );
+
+    const float x = 46.0f;
+    const float y = 104.0f;
+    const float width = UI_TOP_W - 2.0f * x;
+    const float height = 76.0f;
+    const u32 accent = model->paired ? UI_MINT : UI_AZURE;
+
+    ui_panel_outlined(
+        x,
+        y,
+        width,
+        height,
+        UI_CHAMFER,
+        UI_BG2,
+        ui_alpha(accent, model->paired ? 110 : 70)
+    );
+    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
+
+    if (model->paired) {
+        ui_draw(
+            x + 16.0f,
+            y + 11.0f,
+            UI_SCALE_MICRO,
+            accent,
+            C2D_AlignLeft,
+            "PAIRED MACHINE"
+        );
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 27.0f,
+            width - 32.0f,
+            UI_SCALE_HEAD,
+            UI_INK,
+            C2D_AlignLeft,
+            model->paired_bridge != NULL ? model->paired_bridge : "bridge"
+        );
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 49.0f,
+            width - 32.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            model->paired_endpoint != NULL ? model->paired_endpoint : ""
+        );
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 60.0f,
+            width - 32.0f,
+            UI_SCALE_MICRO,
+            ui_alpha(UI_INK_FAINT, 210),
+            C2D_AlignLeft,
+            model->paired_since != NULL ? model->paired_since : ""
+        );
+    } else {
+        ui_draw(
+            x + 16.0f,
+            y + 11.0f,
+            UI_SCALE_MICRO,
+            accent,
+            C2D_AlignLeft,
+            "NO MACHINE PAIRED"
+        );
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 27.0f,
+            width - 32.0f,
+            UI_SCALE_BODY,
+            UI_INK,
+            C2D_AlignLeft,
+            "Start the bridge on your computer"
+        );
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 48.0f,
+            width - 32.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            "then scan the QR code it prints"
+        );
+    }
+
+    ui_draw_clipped(
+        center_x,
+        216.0f,
+        360.0f,
+        UI_SCALE_MICRO,
+        UI_INK_FAINT,
+        C2D_AlignCenter,
+        model->version != NULL ? model->version : ""
+    );
+}
+
+static void ui_render_bottom_home(const UiModel *model)
+{
+    ui_fill(0.0f, 0.0f, UI_BOT_W, UI_SCREEN_H, UI_BG0);
+    ui_bottom_status(model, false);
+
+    /*
+     * The menu is the action surface here, so it takes the whole band between
+     * the status header and the bar. There is no chip grid: every row already
+     * carries its own explanation, and five rows plus chips do not fit.
+     */
+    const float row_height = 27.0f;
+    const float x = 10.0f;
+    const float width = UI_BOT_W - 2.0f * x;
+    float y = UI_STATUS_H + 4.0f;
+
+    for (size_t index = 0; index < model->menu_count && index < 5; index++) {
+        const bool selected = index == model->menu_selected;
+        const bool enabled = model->menu_enabled == NULL
+            || model->menu_enabled[index];
+        const u32 ink = !enabled
+            ? ui_alpha(UI_INK_FAINT, 150)
+            : (selected ? UI_INK : UI_INK_DIM);
+
+        /* The panel has to clear both text lines, or it crops the hint. */
+        if (selected) {
+            ui_panel_outlined(
+                x,
+                y,
+                width,
+                row_height - 2.0f,
+                2.0f,
+                ui_blend(UI_AZURE, enabled ? 34 : 14, UI_BG0),
+                ui_alpha(UI_AZURE, enabled ? 150 : 60)
+            );
+        }
+        ui_fill(x + 3.0f, y + 3.0f, 2.0f, row_height - 8.0f, selected ? UI_AZURE : UI_LINE);
+        ui_draw_clipped(
+            x + 13.0f,
+            y + 1.0f,
+            width - 26.0f,
+            UI_SCALE_LABEL,
+            ink,
+            C2D_AlignLeft,
+            model->menu_labels[index]
+        );
+        if (model->menu_hints != NULL) {
+            ui_draw_clipped(
+                x + 13.0f,
+                y + 13.0f,
+                width - 26.0f,
+                UI_SCALE_MICRO,
+                ui_alpha(UI_INK_FAINT, enabled ? 220 : 130),
+                C2D_AlignLeft,
+                model->menu_hints[index]
+            );
+        }
+        y += row_height;
+    }
+
+    ui_draw(
+        UI_BOT_W / 2.0f,
+        UI_BAR_Y - 13.0f,
+        UI_SCALE_MICRO,
+        UI_INK_FAINT,
+        C2D_AlignCenter,
+        "Up/Down choose      A select      START exit"
+    );
+    ui_bottom_bar(model);
+}
+
+/* ------------------------------------------------------------- pairing -- */
+
+/* Corner brackets rather than a full frame: they mark the target without
+ * hiding the QR the user is trying to fill it with. */
+static void ui_pairing_reticle(void)
+{
+    const float size = 132.0f;
+    const float left = (UI_TOP_W - size) / 2.0f;
+    const float top = (UI_SCREEN_H - size) / 2.0f - 6.0f;
+    const float arm = 26.0f;
+    const float thickness = 3.0f;
+    const u32 color = ui_alpha(UI_MINT, 220);
+
+    const float corners[4][2] = {
+        { left, top },
+        { left + size - arm, top },
+        { left, top + size - thickness },
+        { left + size - arm, top + size - thickness },
+    };
+    for (int index = 0; index < 4; index++) {
+        ui_fill(corners[index][0], corners[index][1], arm, thickness, color);
+    }
+    const float verticals[4][2] = {
+        { left, top },
+        { left + size - thickness, top },
+        { left, top + size - arm },
+        { left + size - thickness, top + size - arm },
+    };
+    for (int index = 0; index < 4; index++) {
+        ui_fill(verticals[index][0], verticals[index][1], thickness, arm, color);
+    }
+}
+
+static void ui_render_top_pairing(const UiModel *model)
+{
+    ui_fill(0.0f, 0.0f, UI_TOP_W, UI_SCREEN_H, UI_BG0);
+
+    if (model->pairing_preview_ready && photo_texture_ready) {
+        C2D_DrawImageAt(photo_image, 0.0f, 0.0f, 0.0f, NULL, 1.0f, 1.0f);
+    } else {
+        ui_draw(
+            UI_TOP_W / 2.0f,
+            104.0f,
+            UI_SCALE_BODY,
+            UI_INK_FAINT,
+            C2D_AlignCenter,
+            "Opening the camera..."
+        );
+        ui_spinner(UI_TOP_W / 2.0f, 132.0f, 10.0f, 2.6f, UI_AZURE);
+    }
+
+    if (model->pairing_phase == UI_PAIRING_AIMING) {
+        ui_pairing_reticle();
+    } else {
+        const u32 accent = model->pairing_phase == UI_PAIRING_FAILED
+            ? UI_ROSE
+            : (model->pairing_phase == UI_PAIRING_SUCCEEDED ? UI_MINT : UI_AZURE);
+        const char *title = "READING PAIRING CODE";
+        if (model->pairing_phase == UI_PAIRING_EXCHANGING) {
+            title = "ASKING THE BRIDGE TO PAIR";
+        } else if (model->pairing_phase == UI_PAIRING_SUCCEEDED) {
+            title = "PAIRED";
+        } else if (model->pairing_phase == UI_PAIRING_FAILED) {
+            title = "PAIRING FAILED";
+        }
+        /*
+         * `ui_attention_card` dims from the header band down, because every
+         * other screen has a header there. This one is full-bleed camera, so
+         * the same scrim has to cover the top strip too.
+         */
+        ui_fill(0.0f, 0.0f, UI_TOP_W, UI_HEADER_H, ui_alpha(UI_BG0, 236));
+        ui_attention_card(
+            title,
+            accent,
+            model->pairing_message != NULL ? model->pairing_message : "",
+            model->pairing_phase == UI_PAIRING_FAILED
+                ? "A  scan again        Y  type the code        B  back"
+                : "B  cancel"
+        );
+    }
+
+    ui_fill_vertical(
+        0.0f,
+        UI_SCREEN_H - 34.0f,
+        UI_TOP_W,
+        34.0f,
+        ui_alpha(UI_BG0, 0),
+        ui_alpha(UI_BG0, 235)
+    );
+    ui_draw_clipped(
+        UI_PAD,
+        UI_SCREEN_H - 20.0f,
+        UI_TOP_W - 2.0f * UI_PAD - 70.0f,
+        UI_SCALE_MICRO,
+        UI_INK,
+        C2D_AlignLeft,
+        model->pairing_phase == UI_PAIRING_AIMING
+            ? "Fill the brackets with the QR code on your computer"
+            : (model->pairing_message != NULL ? model->pairing_message : "")
+    );
+    if (model->pairing_phase == UI_PAIRING_AIMING) {
+        ui_drawf(
+            UI_TOP_W - UI_PAD,
+            UI_SCREEN_H - 20.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignRight,
+            "%u looks",
+            model->pairing_frames_examined
+        );
+    }
+}
+
+static void ui_render_bottom_pairing(const UiModel *model)
+{
+    ui_fill(0.0f, UI_HERO_Y, UI_BOT_W, UI_BAR_Y - UI_HERO_Y, UI_BG0);
+    ui_bottom_status(
+        model,
+        model->pairing_phase == UI_PAIRING_EXCHANGING
+            || model->pairing_phase == UI_PAIRING_DECODED
+    );
+
+    const float x = 12.0f;
+    const float y = 62.0f;
+    const float width = UI_BOT_W - 24.0f;
+    const float height = 74.0f;
+    const u32 accent = model->pairing_phase == UI_PAIRING_FAILED
+        ? UI_ROSE
+        : (model->pairing_phase == UI_PAIRING_SUCCEEDED ? UI_MINT : UI_AZURE);
+
+    ui_panel_outlined(x, y, width, height, UI_CHAMFER, UI_BG2, ui_alpha(accent, 110));
+
+    if (model->pairing_phase == UI_PAIRING_SUCCEEDED) {
+        ui_draw(x + 16.0f, y + 12.0f, UI_SCALE_LABEL, UI_MINT, C2D_AlignLeft, "Paired");
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 34.0f,
+            width - 32.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            model->pairing_bridge != NULL ? model->pairing_bridge : ""
+        );
+        ui_draw(
+            x + 16.0f,
+            y + 52.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignLeft,
+            "A  continue to this machine"
+        );
+    } else if (model->pairing_phase == UI_PAIRING_FAILED) {
+        ui_draw(x + 16.0f, y + 12.0f, UI_SCALE_LABEL, UI_ROSE, C2D_AlignLeft, "Not paired");
+        ui_draw_clipped(
+            x + 16.0f,
+            y + 34.0f,
+            width - 32.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            model->pairing_message != NULL ? model->pairing_message : ""
+        );
+        ui_draw(
+            x + 16.0f,
+            y + 52.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignLeft,
+            "The code expires; ask the bridge for a new one"
+        );
+    } else if (model->pairing_phase == UI_PAIRING_AIMING) {
+        ui_draw(
+            x + 16.0f,
+            y + 12.0f,
+            UI_SCALE_LABEL,
+            UI_INK,
+            C2D_AlignLeft,
+            "Looking for a QR code"
+        );
+        ui_draw(
+            x + 16.0f,
+            y + 34.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            "Hold the handheld steady, about 20 cm away"
+        );
+        ui_indeterminate_bar(x + 16.0f, y + height - 18.0f, width - 32.0f, UI_AZURE);
+    } else {
+        ui_spinner(x + 32.0f, y + 30.0f, 9.0f, 2.4f, UI_AZURE);
+        ui_draw(
+            x + 56.0f,
+            y + 20.0f,
+            UI_SCALE_LABEL,
+            UI_INK,
+            C2D_AlignLeft,
+            "Exchanging the code"
+        );
+        ui_draw_clipped(
+            x + 56.0f,
+            y + 42.0f,
+            width - 72.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            "The bridge issues a revocable device key"
+        );
+    }
+
+    const bool failed = model->pairing_phase == UI_PAIRING_FAILED;
+    const bool done = model->pairing_phase == UI_PAIRING_SUCCEEDED;
+    const UiChip chips[3] = {
+        { "A", done ? "Continue" : "Rescan", done || failed },
+        { "Y", "Type code", !done },
+        { "B", done ? "Home" : "Cancel", true },
+    };
+    ui_chip_grid(chips, 3);
     ui_bottom_bar(model);
 }
 
@@ -1802,7 +2203,7 @@ static void ui_render_bottom_sessions(const UiModel *model)
     const UiChip chips[3] = {
         { "UD", "Choose", !model->sessions_retryable && model->session_count > 1 },
         { "A", model->sessions_retryable ? "Retry" : "Resume", true },
-        { "ST", "Exit", true },
+        { "ST", "Back", true },
     };
     ui_chip_grid(chips, 3);
 
@@ -2016,27 +2417,38 @@ bool ui_photo_preview_set(
     unsigned int height
 )
 {
-    ui_photo_preview_clear();
     if (rgb565 == NULL
         || width == 0
         || height == 0
         || width > UI_PHOTO_TEX_W
         || height > UI_PHOTO_TEX_H) {
+        ui_photo_preview_clear();
         return false;
     }
-    if (!C3D_TexInit(
-            &photo_texture,
-            (u16)UI_PHOTO_TEX_W,
-            (u16)UI_PHOTO_TEX_H,
-            GPU_RGB565
-        )) {
-        return false;
+    /*
+     * The pairing viewfinder calls this every delivered frame, so reuse the
+     * existing texture and rewrite its pixels rather than freeing and
+     * reallocating 256 KiB of VRAM thirty times a second.
+     */
+    if (!photo_texture_ready) {
+        if (!C3D_TexInit(
+                &photo_texture,
+                (u16)UI_PHOTO_TEX_W,
+                (u16)UI_PHOTO_TEX_H,
+                GPU_RGB565
+            )) {
+            return false;
+        }
+        C3D_TexSetFilter(&photo_texture, GPU_LINEAR, GPU_NEAREST);
+        memset(
+            photo_texture.data,
+            0,
+            (size_t)UI_PHOTO_TEX_W * UI_PHOTO_TEX_H * 2u
+        );
     }
-    C3D_TexSetFilter(&photo_texture, GPU_LINEAR, GPU_NEAREST);
 
     u16 *destination = (u16 *)photo_texture.data;
     const u16 *source = (const u16 *)(const void *)rgb565;
-    memset(destination, 0, (size_t)UI_PHOTO_TEX_W * UI_PHOTO_TEX_H * 2u);
     for (unsigned int y = 0; y < height; y++) {
         for (unsigned int x = 0; x < width; x++) {
             destination[ui_tiled_offset(x, y, UI_PHOTO_TEX_W)] =
@@ -2171,6 +2583,12 @@ void ui_render(const UiModel *model)
         case UI_SCREEN_BOOT:
             ui_render_top_boot(model);
             break;
+        case UI_SCREEN_HOME:
+            ui_render_top_home(model);
+            break;
+        case UI_SCREEN_PAIRING:
+            ui_render_top_pairing(model);
+            break;
         case UI_SCREEN_SESSIONS:
             ui_render_top_sessions(model);
             break;
@@ -2188,6 +2606,12 @@ void ui_render(const UiModel *model)
     switch (model->screen) {
         case UI_SCREEN_BOOT:
             ui_render_bottom_boot(model);
+            break;
+        case UI_SCREEN_HOME:
+            ui_render_bottom_home(model);
+            break;
+        case UI_SCREEN_PAIRING:
+            ui_render_bottom_pairing(model);
             break;
         case UI_SCREEN_SESSIONS:
             ui_render_bottom_sessions(model);

@@ -1,4 +1,6 @@
-import { resolve } from "node:path";
+import { hostname, networkInterfaces } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import type { Server } from "node:net";
 import type { Socket } from "node:net";
 
@@ -6,7 +8,16 @@ import type { AgentAdapter } from "./agent-adapter.js";
 import { CodexAgentAdapter } from "./codex-agent-adapter.js";
 import { EventStore } from "./event-store.js";
 import { FakeAgentAdapter } from "./fake-agent-adapter.js";
+import {
+  DEFAULT_PAIRING_TTL_MS,
+  formatPairingCode,
+  PairingStore,
+  sanitizeBridgeName,
+  type PairingOffer,
+} from "./pairing.js";
 import { createPushControlServer } from "./push-server.js";
+import { encodeQr } from "./qr-encode.js";
+import { renderQrToSvg, renderQrToTerminal } from "./qr-render.js";
 import { createBridgeServer } from "./server.js";
 import { ReverseTunnelClient } from "./reverse-tunnel.js";
 import {
@@ -36,6 +47,35 @@ interface Options {
   relayHost: string | null;
   relayHttpUplinkPort: number;
   relayPushUplinkPort: number;
+  pair: boolean;
+  pairingTtlSeconds: number;
+  requirePairing: boolean;
+  devicesPath: string;
+  pairingSvgPath: string;
+  bridgeName: string;
+  advertiseHost: string | null;
+  listDevices: boolean;
+  revokeDeviceId: string | null;
+}
+
+/*
+ * The bind address is usually 0.0.0.0 or 127.0.0.1, neither of which a 3DS can
+ * dial. Advertise the first non-internal IPv4 address instead, and let
+ * --advertise-host override it for relay or multi-homed setups.
+ */
+function detectAdvertiseHost(bindHost: string): string {
+  if (bindHost !== "0.0.0.0" && bindHost !== "::" && bindHost !== "127.0.0.1"
+    && bindHost !== "localhost" && bindHost !== "::1") {
+    return bindHost;
+  }
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === "IPv4" && !address.internal) {
+        return address.address;
+      }
+    }
+  }
+  return "127.0.0.1";
 }
 
 function parseArguments(arguments_: string[]): Options {
@@ -59,6 +99,15 @@ function parseArguments(arguments_: string[]): Options {
     relayHost: null,
     relayHttpUplinkPort: 9180,
     relayPushUplinkPort: 9181,
+    pair: false,
+    pairingTtlSeconds: DEFAULT_PAIRING_TTL_MS / 1000,
+    requirePairing: false,
+    devicesPath: resolve("data", "devices.json"),
+    pairingSvgPath: resolve("data", "pairing.svg"),
+    bridgeName: sanitizeBridgeName(hostname().split(".")[0] ?? "bridge"),
+    advertiseHost: null,
+    listDevices: false,
+    revokeDeviceId: null,
   };
   for (let index = 0; index < arguments_.length; index += 1) {
     const argument = arguments_[index];
@@ -118,6 +167,30 @@ function parseArguments(arguments_: string[]): Options {
     } else if (argument === "--relay-push-uplink-port" && value !== undefined) {
       options.relayPushUplinkPort = Number(value);
       index += 1;
+    } else if (argument === "--pair") {
+      options.pair = true;
+    } else if (argument === "--pairing-ttl-seconds" && value !== undefined) {
+      options.pairingTtlSeconds = Number(value);
+      index += 1;
+    } else if (argument === "--require-pairing") {
+      options.requirePairing = true;
+    } else if (argument === "--devices-path" && value !== undefined) {
+      options.devicesPath = resolve(value);
+      index += 1;
+    } else if (argument === "--pairing-svg-path" && value !== undefined) {
+      options.pairingSvgPath = resolve(value);
+      index += 1;
+    } else if (argument === "--bridge-name" && value !== undefined) {
+      options.bridgeName = sanitizeBridgeName(value);
+      index += 1;
+    } else if (argument === "--advertise-host" && value !== undefined) {
+      options.advertiseHost = value;
+      index += 1;
+    } else if (argument === "--list-devices") {
+      options.listDevices = true;
+    } else if (argument === "--revoke-device" && value !== undefined) {
+      options.revokeDeviceId = value;
+      index += 1;
     } else {
       throw new Error(`unknown or incomplete argument: ${argument ?? ""}`);
     }
@@ -144,10 +217,77 @@ function parseArguments(arguments_: string[]): Options {
     || options.fakeDeltaIntervalMs > 10_000) {
     throw new Error("--fake-delta-ms must be an integer from 1 to 10000");
   }
+  if (!Number.isInteger(options.pairingTtlSeconds)
+    || options.pairingTtlSeconds < 30
+    || options.pairingTtlSeconds > 3_600) {
+    throw new Error("--pairing-ttl-seconds must be an integer from 30 to 3600");
+  }
   return options;
 }
 
 const options = parseArguments(process.argv.slice(2));
+const pairing = new PairingStore({path: options.devicesPath});
+
+if (options.listDevices || options.revokeDeviceId !== null) {
+  if (options.revokeDeviceId !== null) {
+    const revoked = pairing.revoke(options.revokeDeviceId);
+    console.log(revoked
+      ? `Revoked ${options.revokeDeviceId}.`
+      : `No paired device with ID ${options.revokeDeviceId}.`);
+    if (!revoked) {
+      process.exit(1);
+    }
+  }
+  const devices = pairing.list();
+  if (devices.length === 0) {
+    console.log(`No paired devices in ${pairing.path}.`);
+  } else {
+    console.log(`Paired devices in ${pairing.path}:`);
+    for (const device of devices) {
+      console.log(
+        `  ${device.deviceId}  ${device.name}  paired ${device.pairedAt}`
+        + `  last seen ${device.lastSeenAt ?? "never"}`,
+      );
+    }
+  }
+  process.exit(0);
+}
+
+/*
+ * Show a pairing code when asked, and on a first run with nothing paired yet:
+ * a bridge no handheld knows about has nothing else useful to offer.
+ */
+function openPairingOffer(): PairingOffer {
+  const offer = pairing.createOffer(
+    {
+      host: options.advertiseHost ?? detectAdvertiseHost(options.host),
+      httpPort: options.port,
+      pushPort: options.pushPort,
+      bridgeName: options.bridgeName,
+    },
+    options.pairingTtlSeconds * 1_000,
+  );
+  const matrix = encodeQr(offer.url);
+  let svgNote = "";
+  try {
+    mkdirSync(dirname(options.pairingSvgPath), {recursive: true});
+    writeFileSync(options.pairingSvgPath, renderQrToSvg(matrix), "utf8");
+    svgNote = `\nEasier to scan full screen: open ${options.pairingSvgPath}`;
+  } catch (error) {
+    svgNote = `\nCould not write ${options.pairingSvgPath}: `
+      + `${error instanceof Error ? error.message : "unknown error"}`;
+  }
+  console.log(
+    `\nPair a 3DS with this bridge (valid for ${options.pairingTtlSeconds}s):\n\n`
+    + `${renderQrToTerminal(matrix)}\n\n`
+    + `Manual entry:  ${offer.endpoint.host} ${offer.endpoint.httpPort} `
+    + `${offer.endpoint.pushPort} ${formatPairingCode(offer.code)}\n`
+    + `QR payload:    ${offer.url} (v${matrix.version}, ${matrix.size}x${matrix.size})`
+    + `${svgNote}\n`,
+  );
+  return offer;
+}
+
 const events = new EventStore();
 let adapter: AgentAdapter;
 if (options.adapter === "codex") {
@@ -192,6 +332,8 @@ const {application, server} = createBridgeServer({
   ...(transcriber === undefined ? {} : {transcriber}),
   verbose: options.verbose,
   verbosePolls: options.verbosePolls,
+  pairing,
+  requirePairing: options.requirePairing,
 });
 const pushServer = createPushControlServer(application, {
   blackholeAfterReady: options.pushTestBlackhole,
@@ -230,12 +372,15 @@ server.listen(options.port, options.host, () => {
 pushServer.on("listening", () => {
   reverseTunnel?.start();
   console.log(
-    `3gent 0.6 hardware-test bridge listening on http://${options.host}:${options.port}\n`
+    `3gent 0.8 pairing bridge listening on http://${options.host}:${options.port}\n`
     + `Pushed control: tcp://${options.host}:${options.pushPort}\n`
+    + `Bridge name: ${options.bridgeName}\n`
     + `Adapter: ${options.adapter === "codex" ? "Codex app-server" : "deterministic fake agent"}\n`
     + `Transcriber: ${transcriber?.id ?? "not configured"}\n`
     + `Relay: ${options.relayHost ?? "disabled"}\n`
     + `Audio capture: ${options.capturePath}\n`
+    + `Paired devices: ${pairing.deviceCount} in ${pairing.path}\n`
+    + `Device tokens: ${options.requirePairing ? "REQUIRED" : "accepted but not required"}\n`
     + `Logging: ${options.verbose
       ? `VERBOSE (${options.verbosePolls ? "including empty polls" : "empty polls hidden"})`
       : "summary"}\n`
@@ -245,8 +390,13 @@ pushServer.on("listening", () => {
     + (options.pushTestBlackhole || options.pushTestDropNextAck
       ? "WARNING: PUSH FAULT INJECTION IS ENABLED FOR HARDWARE TESTING.\n"
       : "")
-    + "LOCAL DEVELOPMENT ONLY: pairing and authentication are not implemented.",
+    + "LOCAL DEVELOPMENT ONLY: this link is still plaintext and unencrypted.",
   );
+  if (options.pair || pairing.deviceCount === 0) {
+    openPairingOffer();
+  } else {
+    console.log("Run with --pair to show a pairing QR code for another handheld.");
+  }
 });
 
 let shuttingDown = false;

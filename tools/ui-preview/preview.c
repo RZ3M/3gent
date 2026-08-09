@@ -40,7 +40,7 @@ static const char *working_response =
     "session after twelve, so a stalled write should surface within one "
     "reconnect window. Patching the cursor order now";
 
-#define MAX_DOCUMENTS 16
+#define MAX_DOCUMENTS 24
 static char document_captions[MAX_DOCUMENTS][96];
 static char *document_markup[MAX_DOCUMENTS];
 static size_t document_count;
@@ -138,10 +138,29 @@ static void write_index(void)
     printf("wrote " OUTPUT_DIRECTORY "/index.html\n");
 }
 
+static const char *menu_labels[5] = {
+    "Connect",
+    "Pair with a QR code",
+    "Enter a pairing code",
+    "Forget this machine",
+    "Exit",
+};
+
+static const char *menu_hints[5] = {
+    "jm-mbp at 192.168.1.42:8080",
+    "Scan the code your bridge prints",
+    "Type the address and code by hand",
+    "Delete the device key saved on the SD card",
+    "Close 3gent",
+};
+
+static const bool menu_paired[5] = { true, true, true, true, true };
+static const bool menu_unpaired[5] = { true, true, true, false, true };
+
 static void base_model(UiModel *model)
 {
     memset(model, 0, sizeof(*model));
-    model->version = "0.7.0-gui";
+    model->version = "0.8.0-pairing";
     model->session_label = "3gent - wire the citro2d renderer";
     model->server_host = "192.168.1.2";
     model->server_port = 8080;
@@ -163,6 +182,16 @@ static void base_model(UiModel *model)
     model->photo_progress_percent = UI_PHOTO_PROGRESS_NONE;
     model->session_labels = sample_labels;
     model->sessions_status = "";
+    model->menu_labels = menu_labels;
+    model->menu_hints = menu_hints;
+    model->menu_enabled = menu_paired;
+    model->menu_count = 5;
+    model->paired = true;
+    model->paired_bridge = "jm-mbp";
+    model->paired_endpoint = "192.168.1.42  port 8080  push 8081";
+    model->paired_since = "paired 2026-08-09  key dev_5f2ac91b0e77d4a3";
+    model->pairing_message = "";
+    model->pairing_bridge = "";
     model->screen = UI_SCREEN_MAIN;
 }
 
@@ -176,6 +205,87 @@ int main(void)
 
     UiModel model;
 
+    /* Start screen, already paired */
+    base_model(&model);
+    model.screen = UI_SCREEN_HOME;
+    model.agent_state = "";
+    model.view_state = "Ready to connect";
+    model.detail = "sdmc:/3ds/3gent/pairing.cfg";
+    model.detail_secondary = "";
+    model.link_state = "idle";
+    model.server_host = "192.168.1.42";
+    model.menu_selected = 0;
+    preview_set_time(400);
+    ui_render(&model);
+    write_document("01-home-paired", "start / a machine is already paired");
+
+    /* Start screen, nothing paired yet */
+    base_model(&model);
+    model.screen = UI_SCREEN_HOME;
+    model.agent_state = "";
+    model.view_state = "No machine paired";
+    model.detail = "Pair with a machine, or use the built-in development host";
+    model.detail_secondary = "";
+    model.link_state = "idle";
+    model.paired = false;
+    model.paired_since = "";
+    model.menu_enabled = menu_unpaired;
+    model.menu_hints = (const char *const []){
+        "development host 192.168.1.2:8080",
+        menu_hints[1],
+        menu_hints[2],
+        menu_hints[3],
+        menu_hints[4],
+    };
+    model.menu_selected = 1;
+    preview_set_time(700);
+    ui_render(&model);
+    write_document("02-home-unpaired", "start / nothing paired yet");
+
+    /* Pairing viewfinder */
+    base_model(&model);
+    model.screen = UI_SCREEN_PAIRING;
+    model.view_state = "Scanning for a QR code";
+    model.detail = "Outer camera, 400x240 RGB565";
+    model.detail_secondary = "";
+    model.pairing_phase = UI_PAIRING_AIMING;
+    model.pairing_preview_ready = true;
+    model.pairing_frames_examined = 14;
+    model.pairing_message = "Point the outer camera at the QR code";
+    static u8 viewfinder[400 * 240 * 2];
+    ui_photo_preview_set(viewfinder, 400, 240);
+    preview_set_time(1000);
+    ui_render(&model);
+    write_document("03-pairing-aiming", "pairing / aiming at the bridge QR code");
+
+    /* Pairing exchange */
+    base_model(&model);
+    model.screen = UI_SCREEN_PAIRING;
+    model.view_state = "Pairing...";
+    model.detail = "POST /v1/pair";
+    model.detail_secondary = "";
+    model.pairing_phase = UI_PAIRING_EXCHANGING;
+    model.pairing_preview_ready = true;
+    model.pairing_message = "Asking jm-mbp to pair...";
+    model.pairing_bridge = "jm-mbp at 192.168.1.42:8080";
+    preview_set_time(1300);
+    ui_render(&model);
+    write_document("04-pairing-exchange", "pairing / exchanging the one-time code");
+
+    /* Pairing failure */
+    base_model(&model);
+    model.screen = UI_SCREEN_PAIRING;
+    model.view_state = "Not paired";
+    model.detail = "HTTP 403";
+    model.detail_secondary = "";
+    model.pairing_phase = UI_PAIRING_FAILED;
+    model.pairing_preview_ready = true;
+    model.pairing_message = "pairing code is not valid";
+    preview_set_time(1600);
+    ui_render(&model);
+    write_document("05-pairing-failed", "pairing / the bridge refused the code");
+    ui_photo_preview_clear();
+
     /* Boot */
     base_model(&model);
     model.screen = UI_SCREEN_BOOT;
@@ -185,7 +295,7 @@ int main(void)
     model.link_state = "connecting";
     preview_set_time(1200);
     ui_render(&model);
-    write_document("01-boot", "boot / warming the low-latency links");
+    write_document("06-boot", "boot / warming the low-latency links");
 
     /* Task chooser */
     base_model(&model);
@@ -200,7 +310,7 @@ int main(void)
     model.sessions_status = "A resumes the highlighted task, X starts a new one";
     preview_set_time(2400);
     ui_render(&model);
-    write_document("02-sessions", "task chooser / six recent Codex tasks");
+    write_document("07-sessions", "task chooser / six recent Codex tasks");
 
     /* Task chooser, discovery failed */
     base_model(&model);
@@ -215,7 +325,7 @@ int main(void)
     model.sessions_status = "Session request failed: connection refused";
     preview_set_time(3000);
     ui_render(&model);
-    write_document("03-sessions-error", "task chooser / bridge unreachable");
+    write_document("08-sessions-error", "task chooser / bridge unreachable");
 
     /* Idle with a completed response */
     base_model(&model);
@@ -229,7 +339,7 @@ int main(void)
     model.diff_deletions = 12;
     preview_set_time(4200);
     ui_render(&model);
-    write_document("04-idle", "main / completed turn with a diff summary");
+    write_document("09-idle", "main / completed turn with a diff summary");
 
     /* Streaming */
     base_model(&model);
@@ -242,7 +352,7 @@ int main(void)
     model.detail_secondary = "Events: pushed link ready";
     preview_set_time(5600);
     ui_render(&model);
-    write_document("05-working", "main / agent working, response streaming");
+    write_document("10-working", "main / agent working, response streaming");
 
     /* Recording. Several frames prime the scrolling level history. */
     base_model(&model);
@@ -261,7 +371,7 @@ int main(void)
         preview_set_time(9000 + frame * 16);
         ui_render(&model);
     }
-    write_document("06-recording", "main / push-to-talk with a live level trace");
+    write_document("11-recording", "main / push-to-talk with a live level trace");
 
     /* Transcript review */
     base_model(&model);
@@ -274,7 +384,7 @@ int main(void)
     model.detail = "Held 7420 ms; captured 7380 ms (241664 bytes)";
     preview_set_time(11000);
     ui_render(&model);
-    write_document("07-transcript", "main / review the transcript before sending");
+    write_document("12-transcript", "main / review the transcript before sending");
 
     /* Approval */
     base_model(&model);
@@ -289,7 +399,7 @@ int main(void)
     model.detail = "Command accepted in 44 ms";
     preview_set_time(12600);
     ui_render(&model);
-    write_document("08-approval", "main / approval required");
+    write_document("13-approval", "main / approval required");
 
     /* Photo review */
     base_model(&model);
@@ -302,7 +412,7 @@ int main(void)
     ui_photo_preview_set(photo, 400, 240);
     preview_set_time(14000);
     ui_render(&model);
-    write_document("09-photo", "camera / review before attaching");
+    write_document("14-photo", "camera / review before attaching");
     ui_photo_preview_clear();
 
     write_index();

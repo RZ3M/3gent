@@ -22,3 +22,7 @@ bridge/data/
 tools/ui-preview/preview
 tools/ui-preview/preview.dSYM/
 tools/ui-preview/out/
+
+# Host QR cross-check
+tools/qr-check/qrcheck
+tools/qr-check/qrcheck.dSYM/

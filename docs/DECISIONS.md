@@ -179,6 +179,67 @@ the bridge owns.
 
 ## Proposed
 
+### D-021 — Vendor quirc as the handheld QR decoder
+
+**Status:** Proposed
+
+QR pairing (D-010) needs a decoder on the 3DS. devkitPro's `portlibs` does not
+package one, so the choice is what to depend on and how.
+
+Alternatives considered:
+
+- **Write a decoder.** A QR reader is not a parser; it is perspective detection,
+  binarisation, grid sampling and Reed-Solomon correction. Getting it wrong
+  fails silently on a camera we cannot test in CI, and the project already
+  refuses to hand-roll comparable primitives.
+- **ZBar or zxing-cpp.** Both are maintained and capable. ZBar is larger and
+  LGPL, which interacts with an unresolved licence question (D-P06); zxing-cpp
+  is C++ and heavier than this client's dependency budget.
+- **quirc 1.2, vendored unmodified.** ~3,000 lines of ISC C written for exactly
+  this case: grayscale frames from an embedded camera. It bounds its own
+  allocations, uses an explicit flood-fill stack rather than deep recursion, and
+  is the decoder other 3DS homebrew already uses.
+
+Decision: vendor quirc 1.2 into `client-3ds/third_party/quirc/` with no local
+modifications, so re-importing upstream is a six-file copy.
+
+Consequences:
+
+- it does not build under this project's `-Wall -Wextra -Werror`, so those four
+  objects are compiled with a relaxed warning set rather than patched; project
+  code stays strict;
+- roughly 120 KB of decoder working memory, allocated only while the pairing
+  viewfinder is open;
+- a full-frame decode costs far more than one frame's budget on Old 3DS, so it
+  runs on a lower-priority worker thread (see R-006);
+- ISC is permissive and compatible with every licence still under consideration
+  for D-P06, but the vendored `LICENSE` must be preserved in any distribution.
+
+Proposed rather than Accepted because the on-hardware scan-reliability evidence
+that would justify locking in a decoder does not exist yet.
+
+### D-022 — Device credential format and when it is enforced
+
+**Status:** Proposed
+
+Pairing issues a device token: 32 random bytes, base64url, presented as
+`Authorization: Bearer` over HTTP and as `deviceToken` in the pushed-control
+hello. The bridge persists only its SHA-256 hash plus a `dev_` identifier, a
+name and timestamps, so a leaked `devices.json` yields no usable credential.
+The handheld stores the token in cleartext at `sdmc:/3ds/3gent/pairing.cfg`,
+which an SD card reader can read; that is what makes per-device revocation a
+requirement rather than a nicety.
+
+The open question is **enforcement**, not format. `--require-pairing` is
+implemented and off by default. Turning it on by default now would mean sending
+a bearer token over an unauthenticated plaintext link, where anyone able to
+reach the port can also read the token in transit. That is not a security
+boundary — it is an identity that looks like one, which is worse than none.
+
+Enforcement should become the default in the same change that lands secure
+transport (D-P11), not before. Until then the bridge accepts, records and can
+verify credentials, and operators who want the check can ask for it.
+
 ### D-P02 — Old 3DS support
 
 **Status:** Proposed default

@@ -196,20 +196,29 @@ until the user sends the reviewed transcript.
 
 ## Stage 4 — QR pairing
 
-**Status:** Deferred from the current hardware-test goal by explicit user choice.
+**Status:** Host and client implementation complete; physical scan and
+persistence checks pending. Enforcement deliberately deferred.
 
-The current build is not a public release. QR pairing, expiring bootstrap data,
-device credentials and revocation return with production security work.
+Delivered in `0.8.0-pairing`:
+- bridge-generated QR, printed to the terminal and written as an SVG;
+- a start screen that owns endpoint selection, replacing the compile-time host;
+- camera scan with off-thread decoding (vendored quirc, D-021);
+- short-lived single-use pairing bootstrap carrying no credential;
+- revocable device credential issuance, stored as a hash on the bridge;
+- `--list-devices` and `--revoke-device`;
+- manual code fallback, including pasting the full pairing URL.
 
-Deliver:
-- bridge-generated QR;
-- camera scan;
-- short-lived pairing bootstrap;
-- device credential issuance;
-- revocation;
-- manual code fallback.
+Not delivered, by decision rather than omission:
+- **token enforcement by default.** `--require-pairing` exists and is off. A
+  bearer token over a plaintext link is an identity, not an access control; it
+  becomes mandatory with secure transport (D-022, D-P11).
+- **endpoint identity binding.** The payload reserves `f` for it.
+- **pairing through the relay.** The QR carries a direct host and port.
 
-Security review required.
+Exit criterion: a physical 3DS scans a bridge QR from a normal laptop screen,
+the credential survives a relaunch, and R-006 has real scan-distance evidence.
+
+Security review still required before any of this is called release-ready.
 
 ---
 

@@ -1,4 +1,4 @@
-# 3gent 0.7 functional-core hardware checklist
+# 3gent 0.8 functional-core hardware checklist
 
 This is the source of truth for the physical Nintendo 3DS validation pass. Host
 tests cannot prove camera, MICU, Wi-Fi, lid/sleep, framebuffer, keyboard or
@@ -10,20 +10,24 @@ repository and disposable prompts/media throughout this build.
 
 ## A. Host and build gate
 
-1. From `bridge/`, run `npm ci` and `npm test`. Require all 44 tests to pass.
-2. Run `codex --version`; record the installed version and confirm ordinary
+1. From `bridge/`, run `npm ci` and `npm test`. Require all 55 tests to pass.
+2. Run `make -C tools/qr-check run`. This decodes the bridge's pairing QR with
+   the same vendored quirc build the handheld uses; require it to print the
+   payload back. A failure here means no amount of camera work will pair.
+3. Run `codex --version`; record the installed version and confirm ordinary
    Codex tasks work on the laptop before involving 3gent.
-3. From `client-3ds/`, run:
+4. From `client-3ds/`, run:
 
    ```sh
    make clean
    make SERVER_HOST=10.0.0.196 SERVER_PORT=8080 PUSH_PORT=8081
    ```
 
-   Replace the address with the laptop's numeric LAN IPv4. Require a clean build.
-4. Copy `3gent.3dsx` and `3gent.smdh` to `/3ds/3gent/` on the SD card. Confirm
-   Homebrew Launcher shows version `0.7.0-gui`.
-5. Create a disposable Git repository/worktree containing at least one text file.
+   The address is now only the fallback for the start screen's "Connect" row
+   when nothing is paired; pairing overrides it. Require a clean build.
+5. Copy `3gent.3dsx` and `3gent.smdh` to `/3ds/3gent/` on the SD card. Confirm
+   Homebrew Launcher shows version `0.8.0-pairing`.
+6. Create a disposable Git repository/worktree containing at least one text file.
 
 ## B. Interface rendering gate
 
@@ -66,6 +70,60 @@ like; anything below that disagrees with the preview is a hardware finding.
 12. Record whether battery drain during a ten-minute idle session is noticeably
     worse than the `0.6.2-hwtest` console build. Both screens now redraw every
     frame; if this is a problem it is a decision for D-020, not a bug fix.
+
+## B2. QR pairing gate
+
+New in `0.8.0-pairing`. This is the section with the least prior hardware
+evidence (R-006), so record measurements, not just pass/fail.
+
+Start the bridge with a pairing offer and a device store you can inspect:
+
+```sh
+npm start -- --host 0.0.0.0 --pair --devices-path ./data/devices.json
+```
+
+1. Confirm the bridge prints a QR code, a manual line, the payload and the SVG
+   path, and that the advertised host is the laptop's LAN address rather than
+   `0.0.0.0` or `127.0.0.1`. A wrong address here is a `--advertise-host` case.
+2. Launch the app. Confirm it opens on the start screen — not on a connection
+   attempt — and reports no machine paired.
+3. Choose "Pair with a QR code". Confirm the viewfinder appears within about a
+   second and the "looks" counter climbs, which is what proves the decoder
+   thread is running rather than stalled.
+4. Leave the viewfinder open for two minutes without scanning anything. Confirm
+   the preview never freezes permanently. If the status line reports "camera
+   restarted N times", record N — that is the R-006 buffer-error recovery doing
+   its job, and a high rate is a finding even though the stream survives.
+5. Open the generated `data/pairing.svg` full screen in a browser and scan it.
+   Record the distance and time to decode. Repeat against the terminal QR and
+   record whether it decodes at all — the answer decides whether the SVG is a
+   convenience or a requirement.
+6. Record scan behaviour at reduced screen brightness and at an angle, and on
+   both Old and New 3DS if available. These are the R-006 numbers.
+7. Confirm the outcome card names the bridge, and that the bridge logs
+   `paired device dev_...`. Confirm `data/devices.json` contains a hash and
+   **no** readable token.
+8. Return to the start screen. Confirm it now names the paired machine, its
+   address and the key ID.
+9. Choose "Connect" and complete one ordinary text turn, to prove the paired
+   endpoint drives real traffic and not just the display.
+10. Press `START` from the agent loop. Confirm it returns to the start screen
+    rather than quitting, and that "Connect" works a second time — this is the
+    pooled-socket reset path.
+11. Quit and relaunch. Confirm the pairing survives, with no rescan.
+12. Point the camera at some unrelated QR code. Confirm the app says the code is
+    not from 3gent and keeps scanning instead of failing out.
+13. Let an offer expire (default 180 s), then scan it. Confirm the failure is
+    named and recoverable in place with `A` or `Y`.
+14. Choose "Enter a pairing code" and pair using the printed manual line on a
+    fresh offer. Try it once with the dashes and once without.
+15. With the bridge running under `--require-pairing`, run
+    `npm start -- --list-devices` and then `--revoke-device <id>` from a second
+    terminal. Confirm the handheld is refused on its next action **without
+    restarting the bridge**, and that pairing again restores it.
+16. Choose "Forget this machine". Confirm the start screen returns to the
+    unpaired state and that the bridge still lists the device — forgetting is
+    local, revocation is not.
 
 ## C. Deterministic fake-adapter regression
 

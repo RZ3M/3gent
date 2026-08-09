@@ -9,11 +9,11 @@ include $(DEVKITARM)/3ds_rules
 
 TARGET      := 3gent
 BUILD       := build
-SOURCES     := source
-INCLUDES    := include
+SOURCES     := source third_party/quirc
+INCLUDES    := include third_party/quirc
 
 APP_TITLE       := 3gent
-APP_DESCRIPTION := citro2d interface hardware-test build
+APP_DESCRIPTION := QR pairing and citro2d interface build
 APP_AUTHOR      := 3gent contributors
 
 SERVER_HOST ?= 192.168.1.2
@@ -70,6 +70,12 @@ else
 $(OUTPUT).3dsx: $(OUTPUT).elf $(_3DSXDEPS)
 $(OFILES):
 $(OUTPUT).elf: $(OFILES)
+
+# Vendored quirc is used unmodified (see third_party/README.md), so it is built
+# without this project's -Werror rather than being patched to satisfy it.
+QUIRC_OFILES := quirc.o decode.o identify.o version_db.o
+$(QUIRC_OFILES): CFLAGS := $(filter-out -Werror,$(CFLAGS)) \
+                           -Wno-sign-compare -Wno-unused-parameter -Wno-type-limits
 
 -include $(DEPSDIR)/*.d
 

@@ -38,6 +38,7 @@
 #define PUSH_STABLE_CONNECTION_MS 10000U
 #define PUSH_RECONNECT_INITIAL_MS 250U
 #define PUSH_RECONNECT_MAX_MS 10000U
+#define DEVICE_TOKEN_CAPACITY 96
 
 typedef void (*NetworkProgressCallback)(
     const char *response,
@@ -167,8 +168,45 @@ static u32 next_command_id = 1;
 static ControlTransaction control_transaction;
 static AudioTransaction audio_transaction;
 static PushConnection push_connection;
+static char device_token[DEVICE_TOKEN_CAPACITY];
+/* Pre-rendered so every request builder can splice it in with one %s. */
+static char authorization_header[DEVICE_TOKEN_CAPACITY + 32];
 
 static void pump_push(void);
+
+bool network_set_device_token(const char *token)
+{
+    device_token[0] = '\0';
+    authorization_header[0] = '\0';
+    if (token == NULL || token[0] == '\0') {
+        return true;
+    }
+    /*
+     * Bridge tokens are base64url. Refusing anything else keeps the value safe
+     * to place in both an HTTP header and a JSON string without escaping.
+     */
+    for (const char *cursor = token; *cursor != '\0'; cursor++) {
+        const char character = *cursor;
+        const bool allowed = (character >= 'A' && character <= 'Z')
+            || (character >= 'a' && character <= 'z')
+            || (character >= '0' && character <= '9')
+            || character == '-' || character == '_' || character == '=';
+        if (!allowed) {
+            return false;
+        }
+    }
+    if (strlen(token) >= sizeof(device_token)) {
+        return false;
+    }
+    snprintf(device_token, sizeof(device_token), "%s", token);
+    snprintf(
+        authorization_header,
+        sizeof(authorization_header),
+        "Authorization: Bearer %s\r\n",
+        device_token
+    );
+    return true;
+}
 
 static void make_command_id(char *command_id, size_t capacity)
 {
@@ -252,13 +290,18 @@ bool network_start(char *error, size_t error_capacity)
     return true;
 }
 
-void network_stop(void)
+void network_reset_connections(void)
 {
     network_push_stop();
     network_control_cancel();
     network_audio_stream_abort();
     close_socket(&prepared_audio_socket);
     close_socket(&control_socket);
+}
+
+void network_stop(void)
+{
+    network_reset_connections();
 
     if (soc_ready) {
         socExit();
@@ -1042,14 +1085,24 @@ static bool push_set_output(const char *frame)
 
 static bool push_build_hello(void)
 {
+    char token_field[DEVICE_TOKEN_CAPACITY + 24] = "";
+    if (device_token[0] != '\0') {
+        snprintf(
+            token_field,
+            sizeof(token_field),
+            ",\"deviceToken\":\"%s\"",
+            device_token
+        );
+    }
     int size = snprintf(
         push_connection.output,
         sizeof(push_connection.output),
         "{\"protocolVersion\":%u,\"type\":\"connection.hello\","
-        "\"sessionId\":\"%s\",\"after\":%u}\n",
+        "\"sessionId\":\"%s\",\"after\":%u%s}\n",
         THREEGENT_PROTOCOL_VERSION,
         push_connection.session_id,
-        push_connection.cursor
+        push_connection.cursor,
+        token_field
     );
     if (size < 0 || (size_t)size >= sizeof(push_connection.output)) {
         set_error(
@@ -1671,13 +1724,15 @@ static bool begin_control_request(
             "Host: %s:%u\r\n"
             "User-Agent: 3gent/%s\r\n"
             "X-3gent-Protocol-Version: %u\r\n"
+            "%s"
             "Connection: keep-alive\r\n"
             "\r\n",
             path,
             host,
             (unsigned int)port,
             THREEGENT_APP_VERSION,
-            THREEGENT_PROTOCOL_VERSION
+            THREEGENT_PROTOCOL_VERSION,
+            authorization_header
         );
     } else {
         char command_id[48];
@@ -1690,6 +1745,7 @@ static bool begin_control_request(
             "User-Agent: 3gent/%s\r\n"
             "X-3gent-Protocol-Version: %u\r\n"
             "X-3gent-Command-Id: %s\r\n"
+            "%s"
             "Content-Type: %s\r\n"
             "Content-Length: %u\r\n"
             "Connection: keep-alive\r\n"
@@ -1700,6 +1756,7 @@ static bool begin_control_request(
             THREEGENT_APP_VERSION,
             THREEGENT_PROTOCOL_VERSION,
             command_id,
+            authorization_header,
             content_type,
             (unsigned int)body_size
         );
@@ -2009,6 +2066,7 @@ static bool begin_media_stream(
         "User-Agent: 3gent/%s\r\n"
         "X-3gent-Protocol-Version: %u\r\n"
         "X-3gent-Command-Id: %s\r\n"
+        "%s"
         "Content-Type: %s\r\n"
         "Transfer-Encoding: chunked\r\n"
         "Connection: keep-alive\r\n"
@@ -2019,6 +2077,7 @@ static bool begin_media_stream(
         THREEGENT_APP_VERSION,
         THREEGENT_PROTOCOL_VERSION,
         command_id,
+        authorization_header,
         content_type
     );
     if (request_size < 0

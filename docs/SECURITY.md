@@ -65,6 +65,38 @@ Requirements:
 - revocation from desktop;
 - manual fallback.
 
+### What version `0.8.0-pairing` implements
+
+- one redeemable offer at a time, expiring in 180 seconds by default, consumed
+  on redemption so a replay cannot mint a second credential;
+- the QR and the typed fallback carry only endpoint plus code, never a token;
+- `POST /v1/pair` returns a 32-byte base64url device token once; the bridge
+  keeps only its SHA-256 hash, alongside a `dev_` identifier, device name and
+  timestamps;
+- constant-time comparison for both the pairing code and the token hash;
+- revocation with `--revoke-device <id>`, listing with `--list-devices`; a
+  running bridge picks up a revocation without being restarted;
+- the token is redacted from verbose HTTP and pushed-control logging.
+
+### What it does not implement, and why
+
+Token checking is **opt-in** (`--require-pairing`, default off). The link is
+still plaintext: anyone positioned to reach the port can also read the token in
+transit, so requiring it would create the appearance of authentication without
+the substance. Enforcement should become the default in the same change that
+lands secure transport (§7, D-P11). Until then the credential is an identity for
+revocation and audit, not an access control.
+
+The handheld stores its token in cleartext at `sdmc:/3ds/3gent/pairing.cfg`.
+The 3DS offers no key storage worth the name and the SD card is removable, so a
+device key must be assumed readable by anyone holding the console. This is
+precisely why credentials are per-device and revocable. Forgetting a pairing on
+the handheld deletes the local file only; it does not revoke anything, and the
+interface says so.
+
+The QR payload reserves an `f` field for endpoint identity material. It is not
+emitted, because nothing verifies it yet.
+
 ## 5. Remote approvals
 
 Each approval response must be bound to:
@@ -162,8 +194,9 @@ raw audio. Verbose terminal output should be treated as sensitive user data.
 
 ## 11. Security TODO before public remote beta
 
-- document device credential format;
-- document revocation;
+- make `--require-pairing` the default, together with secure transport;
+- bind the pairing bootstrap to an endpoint identity (the reserved `f` field);
+- decide how pairing works through the relay, which today it bypasses;
 - document relay authentication;
 - define approval tiers;
 - threat-model replay and impersonation;

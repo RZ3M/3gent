@@ -361,17 +361,62 @@ Start with raw/simple capture. Compression is a later optimization.
 
 **Question:** Can the 3DS camera reliably scan a QR code displayed on common monitors?
 
-**Status:** TODO
+**Status:** DECODER CHOSEN AND CROSS-VALIDATED ON THE HOST / HARDWARE PENDING
 
-Test:
-- Old 3DS;
-- New 3DS if available;
-- different screen brightness;
-- QR sizes;
-- camera distances;
-- decoder candidates.
+**2026-08-09 implementation record:**
 
-Do not block Stage 0 networking on QR work.
+- Decoder: quirc 1.2 (ISC), vendored unmodified into
+  `client-3ds/third_party/quirc/` (D-021). devkitPro's `portlibs` ships no QR
+  decoder, and this is the decoder other 3DS homebrew already relies on.
+- Encoder: a byte-mode level-M encoder in the bridge, versions 1–10. The pairing
+  payload lands at version 5–7 (37×37 to 45×45 modules).
+
+Three things were settled off device rather than guessed:
+
+1. **Encoder/decoder compatibility.** `tools/qr-check/` compiles the *vendored*
+   quirc on the host and decodes the bridge's generated matrix. This caught a
+   real defect immediately: the format-information reservation claimed nine
+   modules per copy instead of eight, which silently shifted the whole codeword
+   stream. Every symbol failed data ECC while still reporting a valid format —
+   exactly the failure mode a unit test of the encoder alone would have missed.
+   A second, independent matrix reader in `bridge/test/pairing.test.ts` guards
+   the same property in `npm test`.
+2. **Decode cost versus the frame loop.** A 400×240 decode is far more than one
+   frame's budget on Old 3DS, so it runs on a worker thread one priority step
+   below the interactive loop, with a single frame in flight. The viewfinder and
+   the network pump keep running while a frame is analysed.
+3. **Frame ownership.** The camera writes to the capture buffer only while a
+   transfer is armed. Delivery and re-arming are therefore separate calls, which
+   makes single-buffered capture race-free instead of merely usually-fine.
+
+Memory: roughly 120 KB of decoder state plus a 192 KB RGB565 frame, allocated
+only while the viewfinder is open and freed when it closes.
+
+**2026-08-09 hardware finding — viewfinder froze at random.** The first physical
+run paired successfully and exercised the whole flow, but the viewfinder
+intermittently stopped updating, at no consistent frame count.
+
+Cause: the streaming path armed transfers with `CAMU_SetReceiving` and waited
+only on the receive event. The 3DS camera also raises a **buffer error
+interrupt**, and when it does it stops feeding the armed transfer. Nothing
+recovers on its own — the receive event simply never signals again, so the
+stream froze wherever it happened to be. The one-shot photo path never hit this
+because it lives for a single frame. devkitPro's own camera example watches this
+interrupt and restarts capture; the streaming path did not.
+
+Fix: acquire `CAMU_GetBufferErrorInterruptEvent`, check it before the receive
+event, and on either that or 1.5 s of silence stop, clear, restart and re-arm.
+A restart counter is surfaced on the pairing screen, so a hardware tester sees
+"camera restarted N times" instead of guessing whether it froze. The stall
+watchdog is deliberately independent of the documented error, because a frozen
+viewfinder with no way out except cancelling is the worst outcome regardless of
+which cause produced it.
+
+**Still needs hardware:** confirmation that the recovery holds over a long
+session and how often it fires; scan reliability against a real laptop panel at
+varying brightness, distance and angle; Old versus New 3DS decode latency;
+whether the terminal QR is usable at all or whether the SVG is required in
+practice; and camera focus behaviour at the ~20 cm the interface suggests.
 
 ---
 

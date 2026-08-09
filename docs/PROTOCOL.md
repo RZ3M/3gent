@@ -101,6 +101,100 @@ client asking whether the bridge had agent-to-3DS events available. The HTTP
 routes remain as a tested fixture and audio path, but `0.1.2-stage1.5` no longer
 uses event polling or HTTP for text/approval/interrupt control.
 
+## 3.5 Pairing and device credentials
+
+Pairing is how a handheld learns which machine to talk to and earns the right to
+talk to it (D-010, D-022, ADR-0001). It runs before any session exists.
+
+### QR and manual bootstrap
+
+The bridge prints a bootstrap. It is short-lived and carries no credential:
+
+```text
+3gent://pair?v=1&h=<host>&p=<httpPort>&q=<pushPort>&c=<code>&n=<bridgeName>
+```
+
+| Field | Meaning |
+| --- | --- |
+| `v` | payload version; a client must refuse a version it does not know |
+| `h` | address the handheld should dial, not the bridge's bind address |
+| `p` | HTTP port |
+| `q` | pushed-control port |
+| `c` | one-time pairing code |
+| `n` | display name, bounded to 20 characters |
+
+Field names are single letters and the name is bounded because the payload has
+to stay inside a QR version a 400×240 camera can resolve; the current payload
+lands at version 5–7. `f` is reserved for the endpoint identity fingerprint that
+secure transport will need (D-P11) and is not emitted yet.
+
+The manual fallback is the same information as four whitespace-separated fields,
+which is what the bridge prints beside the QR code:
+
+```text
+192.168.1.42 8080 8081 K7M2-QX4T-9BWF
+```
+
+Codes are 12 characters from `23456789ABCDEFGHJKMNPQRSTVWXYZ`, an alphabet with
+no visually ambiguous pairs. Grouping dashes are cosmetic; a client normalises
+by uppercasing and dropping everything outside the alphabet. Separators may be
+spaces, colons or commas.
+
+### Exchange
+
+```text
+POST /v1/pair
+X-3gent-Protocol-Version: 1
+Content-Type: application/json
+
+{"code": "K7M2QX4T9BWF", "deviceName": "New 3DS XL"}
+```
+
+```text
+201 Created
+
+{
+  "protocolVersion": 1,
+  "deviceId": "dev_5f2ac91b0e77d4a3",
+  "deviceToken": "<opaque base64url string>",
+  "deviceName": "New 3DS XL",
+  "bridgeName": "jm-mbp",
+  "endpoint": {"host": "192.168.1.42", "httpPort": 8080, "pushPort": 8081}
+}
+```
+
+The endpoint is echoed so a mistyped manual entry is corrected by the bridge
+rather than persisted by the handheld.
+
+Rules:
+
+- one offer is redeemable at a time, and redeeming consumes it;
+- offers expire (180 s by default, `--pairing-ttl-seconds`);
+- the bridge stores only a SHA-256 hash of the token;
+- `POST /v1/pair` is the one `/v1/` route that never requires a token, because
+  it is how a token is obtained;
+- failures are ordinary protocol errors: `PAIRING_NOT_OPEN` (409),
+  `PAIRING_CODE_REJECTED` (403), `PAIRING_UNSUPPORTED` (501).
+
+### Presenting the credential
+
+```text
+Authorization: Bearer <deviceToken>
+```
+
+on every HTTP request, and on the pushed-control link as a `deviceToken` field
+in `connection.hello`. One rule covers both transports.
+
+Enforcement is opt-in (`--require-pairing`). With it off the bridge accepts and
+records tokens but does not demand them, which keeps the existing plaintext
+development path working. See `docs/SECURITY.md` §4 for why defaulting it on
+would overstate what a bearer token achieves over an unencrypted link.
+
+Revocation is a bridge-side operation: `--list-devices` and
+`--revoke-device <id>`. It takes effect on a running bridge without a restart —
+the device store is re-read when the file changes. Deleting the handheld's saved
+key is a separate, local-only action and does not revoke anything.
+
 ## 4.1 Stage 1.5 local pushed control
 
 The current 3DS build opens a separate development-only raw TCP connection on
@@ -108,10 +202,11 @@ port 8081. Both sides set `TCP_NODELAY`. Each frame is one UTF-8 JSON object plu
 `\n`, with a hard 4 KiB frame/input limit. The existing event envelope remains
 the application payload; the transport adds only small wrappers.
 
-The client starts or resumes with its last successfully applied cursor:
+The client starts or resumes with its last successfully applied cursor, and
+presents its device credential if it has one (§3.5):
 
 ```json
-{"protocolVersion":1,"type":"connection.hello","sessionId":"ses_fake_local","after":12}
+{"protocolVersion":1,"type":"connection.hello","sessionId":"ses_fake_local","after":12,"deviceToken":"..."}
 ```
 
 The bridge replies with a session snapshot and then pushes every retained event

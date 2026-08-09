@@ -6,6 +6,8 @@ not a remotely secure product.
 
 The client currently provides:
 
+- a start screen that pairs with a machine by QR code or typed code, and keeps
+  the credential on the SD card;
 - a citro2d GPU interface on both screens, described in `docs/UI_UX.md`;
 - native software-keyboard text capture;
 - bounded-memory live microphone streaming using signed PCM16 mono at 16,364 Hz;
@@ -47,17 +49,20 @@ The desktop bridge requires Node.js 22 or newer and npm.
 
 ## Build the bridge and client
 
-First find the LAN IPv4 address of the computer that will run the bridge. Build
-the 3DS client with that numeric address:
-
 ```sh
 cd client-3ds
 make SERVER_HOST=192.168.1.42 SERVER_PORT=8080 PUSH_PORT=8081
 ```
 
-Replace `192.168.1.42` with the computer's address. Runtime configuration and
-pairing come in later stages. The build produces `3gent.3dsx`, `3gent.smdh`,
-`3gent.elf`, and `build/3gent.map`.
+`SERVER_HOST` is now only the fallback the start screen offers when nothing is
+paired; pairing supplies the address at runtime, so changing machines no longer
+means rebuilding. Replace `192.168.1.42` with the computer's LAN IPv4 address if
+you want that fallback to be useful. The build produces `3gent.3dsx`,
+`3gent.smdh`, `3gent.elf`, and `build/3gent.map`.
+
+The QR decoder is vendored in `third_party/quirc/` and is built with a relaxed
+warning set; the project's own sources stay on `-Wall -Wextra -Werror`. See
+`third_party/README.md`.
 
 From the repository root, install, test, and start the functional Codex bridge:
 
@@ -91,9 +96,21 @@ internet.
 Copy `3gent.3dsx` and `3gent.smdh` into `3ds/3gent/` on the SD card, then launch
 3gent through the Homebrew Launcher.
 
-At launch the top screen lists recent tasks: Up/Down moves the highlight, `A`
-resumes the highlighted task, and `X` creates a new task in `--workspace`. If the
-bridge cannot be reached, the chooser says so and `A` or `X` retries discovery.
+The app opens on the start screen. Up/Down moves the highlight and `A` selects:
+
+- **Connect** — use the paired machine, or the built-in fallback address;
+- **Pair with a QR code** — open the camera and scan what the bridge printed
+  (`npm start -- --pair`). `Y` switches to typing the code, `B` cancels;
+- **Enter a pairing code** — type the four values the bridge printed, with or
+  without the grouping dashes. A pasted `3gent://pair?...` URL also works;
+- **Forget this machine** — delete `sdmc:/3ds/3gent/pairing.cfg`. This is local
+  only; revoke the key on the bridge with `--revoke-device`;
+- **Exit**.
+
+After connecting, the top screen lists recent tasks: Up/Down moves the
+highlight, `A` resumes the highlighted task, and `X` creates a new task in
+`--workspace`. If the bridge cannot be reached, the chooser says so and `A` or
+`X` retries discovery. `START` returns to the start screen.
 
 Runtime controls are also shown as chips on the bottom screen, dimmed when the
 action is unavailable:
@@ -104,7 +121,7 @@ action is unavailable:
 - hold `R`: stream microphone audio, then review its transcript on release;
 - `L`: capture and preview a photo, then attach it to the next prompt;
 - D-pad/Circle Pad Up/Down: scroll the response, including held repeat;
-- `START`: exit.
+- `START`: return to the start screen.
 
 Successful audio is saved as `bridge/data/latest.wav`, transcribed by the
 configured laptop backend, and returned for review. `A` sends the reviewed
@@ -117,7 +134,7 @@ Run this before the longer Stage 1.5 reliability list below:
 
 1. Start the bridge with `--adapter codex --workspace` pointing at a disposable
    test repository; confirm the bridge reports `Adapter: Codex app-server`.
-2. Launch `0.7.0-gui`; confirm no fake session ID is required and up to six
+2. Launch `0.8.0-pairing`; confirm no fake session ID is required and up to six
    recent Codex tasks appear.
 3. Move the selection with tapped Up/Down, resume a task with `A`, and confirm
    the pushed link becomes ready.
@@ -169,7 +186,7 @@ or be treated as production security. Test from a different network/hotspot:
 Record the hardware model, host OS, tool versions, and displayed timings.
 
 1. Start the TypeScript bridge and confirm it prints its listening address.
-2. Launch `0.7.0-gui` through the Homebrew Launcher.
+2. Launch `0.8.0-pairing` through the Homebrew Launcher.
 3. Confirm the bottom status bar shows a mint link dot reading `ready`, the
    `audio link` token is lit, and the header badge reads `READY`.
 4. Press `A`, cancel the keyboard, and confirm the app returns safely.
