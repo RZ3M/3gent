@@ -607,7 +607,10 @@ static u32 ui_link_color(const UiModel *model)
     if (strcmp(state, "ready") == 0) {
         return UI_MINT;
     }
-    if (strcmp(state, "connecting") == 0 || strcmp(state, "retrying") == 0) {
+    /* Every phase network_push_state() reports as in-progress, not just two. */
+    if (strcmp(state, "connecting") == 0
+        || strcmp(state, "retrying") == 0
+        || strcmp(state, "syncing") == 0) {
         return UI_AMBER;
     }
     return UI_INK_FAINT;
@@ -827,7 +830,9 @@ static void ui_response_body(const UiModel *model)
             UI_SCALE_MICRO,
             ui_alpha(UI_INK_FAINT, 190),
             C2D_AlignCenter,
-            "Hold R to speak, or press A to type"
+            model->microphone_ready
+                ? "Hold R to speak, or press A to type"
+                : "Press A to type"
         );
         return;
     }
