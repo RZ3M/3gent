@@ -141,6 +141,40 @@ pool. Per explicit current scope, the 3DS-facing side remains unauthenticated
 plaintext and the relay requires `--unsafe-public`; this is not acceptance of a
 production transport and must be replaced or secured before release.
 
+### D-020 — citro2d for the handheld interface
+
+**Status:** Accepted
+
+The handheld interface is drawn with citro2d on the PICA200 instead of
+libctru's `PrintConsole` text grid.
+
+Alternatives considered:
+
+- **Keep `PrintConsole`.** Smallest change and lowest memory, but the product is
+  a state display: a fixed 8×8 monochrome grid cannot show agent state,
+  approvals, recording level or diff summaries as anything other than more
+  lines of text. It also caused R-020's flicker, because correctness depended on
+  tracking which framebuffer had been partially repainted.
+- **Direct framebuffer drawing.** Full control with no new dependency, but it
+  means hand-writing blitting, alpha blending, and above all text layout against
+  the shared system font. That is the bulk of citro2d.
+- **citro2d.** Ships with the devkitPro `3ds-dev` group already required by this
+  project, is the maintained upstream 2D layer, renders the shared system font
+  at arbitrary scale, and runs on Old 3DS.
+
+Consequences:
+
+- both screens are fully redrawn each frame, which removes the partial-repaint
+  class of bug entirely rather than managing it;
+- the camera preview can no longer be written straight into the framebuffer and
+  is uploaded as a tiled GPU texture instead (see R-021);
+- rendering is isolated in `client-3ds/source/ui.c` behind a `UiModel` struct, so
+  it stays testable off device and cannot acquire side effects;
+- `libcitro2d` and `libcitro3d` join the link line.
+
+This does not change the thin-client invariant. The 3DS still renders state that
+the bridge owns.
+
 ---
 
 ## Proposed

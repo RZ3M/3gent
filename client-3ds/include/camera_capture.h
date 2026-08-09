@@ -17,7 +17,6 @@ bool camera_capture_photo(
     char *error,
     size_t error_capacity
 );
-void camera_capture_draw_preview(const u8 *rgb565);
 void camera_capture_shutdown(void);
 
 #endif

@@ -6,6 +6,7 @@ not a remotely secure product.
 
 The client currently provides:
 
+- a citro2d GPU interface on both screens, described in `docs/UI_UX.md`;
 - native software-keyboard text capture;
 - bounded-memory live microphone streaming using signed PCM16 mono at 16,364 Hz;
 - one pre-warmed HTTP/1.1 audio connection plus the pushed control link;
@@ -18,6 +19,16 @@ The client currently provides:
 - incremental agent text, status, diff summary, approval, and interruption UI;
 - 400×240 outer-camera capture, preview, bounded upload and next-prompt attachment;
 - fixed 4 KiB response storage and held-button scroll navigation.
+
+Rendering is isolated in `source/ui.c`. It reads a `UiModel` and has no side
+effects, so `tools/ui-preview/` can compile the same file on a laptop and emit
+every interface state as SVG. Review a layout change there before flashing:
+
+```sh
+cd tools/ui-preview
+make run
+open out/index.html
+```
 
 Stage 0 keyboard, LAN, streamed rendering, scrolling, sustained microphone
 capture, and warm-connection latency have passed on physical hardware. The first
@@ -80,8 +91,12 @@ internet.
 Copy `3gent.3dsx` and `3gent.smdh` into `3ds/3gent/` on the SD card, then launch
 3gent through the Homebrew Launcher.
 
-At launch, Up/Down chooses a recent task, `A` resumes it, and `X` creates a new
-task in `--workspace`. Runtime controls are:
+At launch the top screen lists recent tasks: Up/Down moves the highlight, `A`
+resumes the highlighted task, and `X` creates a new task in `--workspace`. If the
+bridge cannot be reached, the chooser says so and `A` or `X` retries discovery.
+
+Runtime controls are also shown as chips on the bottom screen, dimmed when the
+action is unavailable:
 
 - `A`: open the native keyboard and send text to the selected agent;
 - `X`: send an approval-test prompt, or approve once when one is pending;
@@ -102,7 +117,7 @@ Run this before the longer Stage 1.5 reliability list below:
 
 1. Start the bridge with `--adapter codex --workspace` pointing at a disposable
    test repository; confirm the bridge reports `Adapter: Codex app-server`.
-2. Launch `0.6.2-hwtest`; confirm no fake session ID is required and up to six
+2. Launch `0.7.0-gui`; confirm no fake session ID is required and up to six
    recent Codex tasks appear.
 3. Move the selection with tapped Up/Down, resume a task with `A`, and confirm
    the pushed link becomes ready.
@@ -154,9 +169,9 @@ or be treated as production security. Test from a different network/hotspot:
 Record the hardware model, host OS, tool versions, and displayed timings.
 
 1. Start the TypeScript bridge and confirm it prints its listening address.
-2. Launch `0.1.2-stage1.5` through the Homebrew Launcher.
-3. Confirm startup reports the audio link warm, `Control push: ready`, and agent
-   state `idle`.
+2. Launch `0.7.0-gui` through the Homebrew Launcher.
+3. Confirm the bottom status bar shows a mint link dot reading `ready`, the
+   `audio link` token is lit, and the header badge reads `READY`.
 4. Press `A`, cancel the keyboard, and confirm the app returns safely.
 5. Press `A`, send `hello from 3DS`, and confirm the bridge accepts it almost
    immediately.
@@ -181,7 +196,7 @@ Record the hardware model, host OS, tool versions, and displayed timings.
 15. With a scrollable response on screen, stop the bridge. Hold Up/Down and
     confirm the screen and held-repeat navigation never freeze while the pushed
     link detects heartbeat loss and enters reconnect backoff.
-16. Restart the bridge. Confirm `Control push` returns to ready, the app visibly
+16. Restart the bridge. Confirm the link state returns to `ready`, the app visibly
     reports a session resync if the bridge cursor restarted, and a new prompt
     displays the complete fake-agent response without restarting the app.
 17. Stop the bridge during a short microphone capture, release `R`, and confirm
@@ -190,11 +205,11 @@ Record the hardware model, host OS, tool versions, and displayed timings.
     stop, replay, resync, or resume behavior.
 19. Press `START` and confirm a clean return to the Homebrew Launcher.
 20. Restart the bridge with `--verbose-polls`. Leave the 3DS idle for at least
-    five seconds; confirm `ping`/`pong` appears, `Control push` remains ready,
+    five seconds; confirm `ping`/`pong` appears, the link state stays `ready`,
     and no `GET /v1/events` request appears at any time.
 21. Press `A`, leave the native keyboard open for at least twenty seconds, then
     cancel. The app deliberately reconnects around this modal system screen;
-    confirm it returns to `Control push: ready` without freezing or losing later
+    confirm the link state returns to `ready` without freezing or losing later
     agent events.
 22. Restart with `--fake-delta-ms 1000`, start a turn, close the 3DS lid for two
     to five seconds during output, then reopen it before the bridge exits. Confirm
@@ -206,7 +221,7 @@ Record the hardware model, host OS, tool versions, and displayed timings.
     Confirm the bridge executes it once, drops the link before acknowledgement,
     and reports the retried command as replayed/duplicate after reconnect. The
     3DS must show only one turn.
-25. Stop the bridge, type and submit one prompt while `Control push` is retrying,
+25. Stop the bridge, type and submit one prompt while the link state is `retrying`,
     then attempt a second prompt. Confirm one bounded command is queued, the
     second attempt gives clear busy feedback, scrolling remains responsive, and
     restoring the bridge sends exactly the first prompt once.
@@ -246,9 +261,10 @@ steps in this Stage 1.5 regression list.
 - `server closed warm connection`: restart the current bridge and retry.
 - `response exceeded the bounded buffer`: report the action and server log; the
   client intentionally rejects oversized event batches.
-- `Agent: offline`: keep the bridge running, retry an action, and record whether
-  it reconnects.
-- `Mic: unavailable`: exit other software using the microphone, record the
-  hexadecimal service error, and restart the app.
+- a rose link dot with `retrying` in the bottom status bar: keep the bridge
+  running, retry an action, and record whether it reconnects.
+- `MIC UNAVAILABLE` in the hold-to-talk card, or a grey `mic` token: exit other
+  software using the microphone, record the hexadecimal service error from the
+  status detail lines, and restart the app.
 - `Audio stream error`: restore the bridge and record again. Partial captures
   are discarded and do not replace the last completed WAV.

@@ -137,25 +137,6 @@ bool camera_capture_photo(
     return true;
 }
 
-void camera_capture_draw_preview(const u8 *rgb565)
-{
-    if (rgb565 == NULL) {
-        return;
-    }
-    u8 *framebuffer = gfxGetFramebuffer(GFX_TOP, GFX_LEFT, NULL, NULL);
-    const u16 *image = (const u16 *)rgb565;
-    for (unsigned int y = 0; y < THREEGENT_PHOTO_HEIGHT; y++) {
-        for (unsigned int x = 0; x < THREEGENT_PHOTO_WIDTH; x++) {
-            unsigned int draw_y = THREEGENT_PHOTO_HEIGHT - 1 - y;
-            unsigned int offset = (draw_y + x * THREEGENT_PHOTO_HEIGHT) * 3;
-            u16 pixel = image[y * THREEGENT_PHOTO_WIDTH + x];
-            framebuffer[offset] = (u8)(((pixel >> 0) & 0x1f) << 3);
-            framebuffer[offset + 1] = (u8)(((pixel >> 5) & 0x3f) << 2);
-            framebuffer[offset + 2] = (u8)(((pixel >> 11) & 0x1f) << 3);
-        }
-    }
-}
-
 void camera_capture_shutdown(void)
 {
     if (camera_ready) {

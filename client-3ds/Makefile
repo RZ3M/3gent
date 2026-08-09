@@ -13,7 +13,7 @@ SOURCES     := source
 INCLUDES    := include
 
 APP_TITLE       := 3gent
-APP_DESCRIPTION := Functional core hardware-test build
+APP_DESCRIPTION := citro2d interface hardware-test build
 APP_AUTHOR      := 3gent contributors
 
 SERVER_HOST ?= 192.168.1.2
@@ -31,7 +31,7 @@ CFLAGS += $(INCLUDE) -D__3DS__ -std=gnu11 \
 
 ASFLAGS := -g $(ARCH)
 LDFLAGS := -specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
-LIBS    := -lctru -lm
+LIBS    := -lcitro2d -lcitro3d -lctru -lm
 LIBDIRS := $(CTRULIB)
 
 ifneq ($(BUILD),$(notdir $(CURDIR)))
