@@ -17,3 +17,8 @@ tools/dev-server/captures/
 bridge/node_modules/
 bridge/dist/
 bridge/data/
+
+# Host interface preview
+tools/ui-preview/preview
+tools/ui-preview/preview.dSYM/
+tools/ui-preview/out/

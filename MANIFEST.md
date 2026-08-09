@@ -9,6 +9,7 @@ Primary project boundaries:
 - `bridge/` — TypeScript/Node bridge, fake adapter, and automated tests
 - `protocol/` — machine-readable protocol-v1 schemas
 - `tools/dev-server/` — retained Stage 0 fixtures and tests
+- `tools/ui-preview/` — host SVG preview of the handheld interface
 - `docs/ARCHITECTURE.md`
 - `docs/DECISIONS.md`
 - `docs/INSPIRATION.md`
@@ -24,5 +25,6 @@ Primary project boundaries:
 - `prompts/00_BOOTSTRAP_CODEX.md`
 - `prompts/01_NEXT_AFTER_STAGE0.md`
 
-Generated 3DS outputs, bridge dependencies/build output, WAV captures, and Python
-caches are intentionally excluded by `.gitignore`.
+Generated 3DS outputs, bridge dependencies/build output, WAV captures, rendered
+interface previews, and Python caches are intentionally excluded by
+`.gitignore`.

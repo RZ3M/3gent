@@ -45,7 +45,7 @@ on the laptop for now.
 The Stage 0A-E implementation now lives in `client-3ds/` and
 `tools/dev-server/`. It includes:
 
-- a minimal top/bottom-screen 3DS application;
+- a citro2d GPU interface across both screens;
 - native software keyboard input;
 - a bounded, timeout-controlled local HTTP request;
 - visible connecting, success, cancellation, and error states;
@@ -77,6 +77,15 @@ summaries, interrupt turns, and answer one-shot command/file approvals. The
 Stage 3 additionally transcribes streamed microphone WAVs on the laptop and
 requires handheld review/send, edit, or cancel before an agent turn. The
 complete path still needs its focused physical hardware check.
+
+Version `0.7.0-gui` replaces the text-console client with a designed citro2d
+interface (D-020, R-021): an agent-state header, wrapped and scrollable response
+text measured from real glyph advances, a diff/scroll/event footer, full-surface
+approval and transcript-review cards, a live push-to-talk meter, context-aware
+button chips, and a GPU-textured camera review. Rendering lives in
+`client-3ds/source/ui.c` behind a `UiModel` struct with no side effects, which
+lets `tools/ui-preview/` compile that same file on a laptop and emit every
+interface state as SVG for review before a hardware run.
 
 See [`client-3ds/README.md`](client-3ds/README.md) for build instructions and the
 device notes. The exhaustive functional-core physical procedure is

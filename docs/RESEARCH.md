@@ -869,6 +869,61 @@ streamed response updates, held scrolling, microphone meters and photo preview.
 
 ---
 
+## R-021 — GPU interface on the handheld
+
+**Question:** Can the thin client render a designed GPU interface with citro2d
+while keeping the existing non-blocking network, microphone and camera paths
+intact on Old 3DS?
+
+**Status:** HOST BUILD PASSED / LAYOUT REVIEWED OFF DEVICE / HARDWARE PENDING
+
+**2026-08-08 implementation record:**
+
+- Host: macOS 26.5.2, Darwin 25.6.0, arm64. Toolchain: devkitARM r68,
+  libctru 2.7.0, citro3d and citro2d from the installed `3ds-dev` group.
+- `client-3ds/source/ui.c` replaces all `PrintConsole` output. `main.c` keeps
+  every protocol, audio, camera and reconnect behavior unchanged and now
+  populates a `UiModel` once per frame.
+- The build is clean under the project's existing `-Wall -Wextra -Werror`.
+
+Three questions had to be answered rather than guessed:
+
+1. **Text measurement.** citro2d can word-wrap at draw time, but scrollback needs
+   line-level control. Advances are read from the shared system font through
+   `C2D_FontGetCharWidthInfo`, cached for ASCII at start-up, and used for greedy
+   wrapping. The wrapped line table is cached and recomputed only when the text
+   itself changes. Callers pass reused fixed buffers, so pointer identity and
+   length cannot prove the content is unchanged; the cache key includes an
+   FNV-1a hash of the text. That costs a few kilobytes of hashing per frame and
+   removes any obligation on `main.c` to invalidate anything.
+2. **Camera preview.** `camera_capture_draw_preview` wrote RGB565 straight into
+   the top framebuffer, which the GPU now owns. The frame is instead tiled into
+   a 512×256 `GPU_RGB565` texture in software (8×8 tiles, Morton order) and
+   drawn as a `C2D_Image`.
+3. **Texture v-axis orientation.** Whether sampled `v` runs bottom-up over
+   stored texture rows decides if the preview appears upside down, and it cannot
+   be verified off device. Rather than hard-code a convention, `ui.c` asks
+   `C2D_FontCalcGlyphPos` for glyph 0 at start-up. That glyph always occupies the
+   top-left cell of the first system-font sheet, so its reported top texture
+   coordinate identifies the convention on the installed libctru. Both branches
+   are implemented.
+
+**Off-device review:** `tools/ui-preview/` compiles the same `ui.c` against a
+recording backend that re-emits every draw call as SVG. It found two real
+defects before any hardware run: translucent fills in `ui_panel_outlined`
+composited against the filled border panel instead of the page, and the
+recording card's level trace overlapped the record indicator while its caption
+overflowed the card. Both are fixed. Glyph advances are approximated on the
+host, so text fit still needs a hardware pass.
+
+**Conclusion:** citro2d is the right layer for this product. Pending hardware
+evidence: sustained frame rate and battery behavior during idle, streaming and
+recording; text legibility at the chosen scales on a physical panel; camera
+preview orientation; and the modal software keyboard returning cleanly with the
+GPU still owned by citro3d.
+
+---
+
 ## Experiment template
 
 When closing a research item, add:

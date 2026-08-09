@@ -1,4 +1,4 @@
-# 3gent 0.6 functional-core hardware checklist
+# 3gent 0.7 functional-core hardware checklist
 
 This is the source of truth for the physical Nintendo 3DS validation pass. Host
 tests cannot prove camera, MICU, Wi-Fi, lid/sleep, framebuffer, keyboard or
@@ -22,10 +22,52 @@ repository and disposable prompts/media throughout this build.
 
    Replace the address with the laptop's numeric LAN IPv4. Require a clean build.
 4. Copy `3gent.3dsx` and `3gent.smdh` to `/3ds/3gent/` on the SD card. Confirm
-   Homebrew Launcher shows version `0.6.2-hwtest`.
+   Homebrew Launcher shows version `0.7.0-gui`.
 5. Create a disposable Git repository/worktree containing at least one text file.
 
-## B. Deterministic fake-adapter regression
+## B. Interface rendering gate
+
+New in `0.7.0-gui`. The interface is now drawn by citro2d on the GPU, so these
+must pass before the behavioural sections mean anything. Review
+`tools/ui-preview/out/index.html` first so you know what each state should look
+like; anything below that disagrees with the preview is a hardware finding.
+
+1. Launch the app. Confirm the boot screen renders the wordmark and gradient
+   rule cleanly, with no tearing, no stuck frame and no console text anywhere.
+2. In the task chooser, confirm the highlighted row is legible, the selection bar
+   tracks Up/Down immediately, and long task labels truncate with an ellipsis
+   instead of overflowing the panel.
+3. Resume a task. Read the top screen from a normal handheld distance and
+   confirm the response body is comfortably legible on a physical panel. Record
+   the model, because Old and New 3DS panels differ. Text that is too small here
+   is a scale change in `UI_SCALE_BODY`, not a waived item.
+4. Leave the app idle for two minutes on the main view. Confirm there is no
+   flicker, no drifting artefacts, and no visible frame-rate collapse. This is
+   the R-020 regression check under the new renderer.
+5. Send a prompt that produces more text than one screen. Confirm wrapping breaks
+   on word boundaries, the scrollbar thumb appears and is proportional, held
+   Up/Down repeats smoothly, and the footer reports the scrollback position.
+6. Trigger an approval. Confirm the coral card takes the read surface, the
+   command wraps and is fully readable, and the bottom screen shows two distinct
+   choice buttons rather than one confirm.
+7. Hold `R`. Confirm both screens switch to the recording treatment, the elapsed
+   time advances smoothly, the level trace visibly responds to speech and
+   silence, and the five-minute progress bar moves. Release and confirm both
+   screens leave the recording state.
+8. Press `L` and confirm the camera review shows the photo **the right way up**
+   and the right way round. R-021 detects the texture orientation at run time; if
+   this is wrong, capture a photo of the screen and record it against R-021.
+9. During the upload, confirm the progress bar and percentage advance to 100.
+10. Press `A` to open the keyboard, leave it for twenty seconds, then cancel.
+    Confirm the interface returns fully drawn with the GPU intact — not black,
+    not stale, not corrupted.
+11. Close and reopen the lid on the main view, then again during a streaming
+    turn. Confirm rendering resumes correctly in both cases.
+12. Record whether battery drain during a ten-minute idle session is noticeably
+    worse than the `0.6.2-hwtest` console build. Both screens now redraw every
+    frame; if this is a problem it is a decision for D-020, not a bug fix.
+
+## C. Deterministic fake-adapter regression
 
 Start:
 
@@ -49,7 +91,7 @@ npm start -- --adapter fake --host 0.0.0.0 --port 8080 --push-port 8081 --verbos
 8. Leave the keyboard open for 20 seconds, cancel, and require push reconnection
    without lost/duplicated later output.
 
-## C. Real Codex task lifecycle
+## D. Real Codex task lifecycle
 
 Start from `bridge/`:
 
@@ -86,7 +128,7 @@ npm start -- --adapter codex \
 10. Trigger an error (for example, safely rename the disposable workspace after
     selecting it). Require a bounded visible error and responsive controls.
 
-## D. Real voice transcription and review
+## E. Real voice transcription and review
 
 Choose one real backend.
 
@@ -123,7 +165,7 @@ the WAV path as the final argument and reads transcript-only stdout.
    `TRANSCRIPT_TOO_LARGE`; no partial text may be sent to Codex.
 10. Leave the app idle for eleven minutes, then record again without restarting.
 
-## E. Camera/photo capture
+## F. Camera/photo capture
 
 1. With the agent idle and no transcript pending, press `L`. Record camera init
    time and shutter latency.
@@ -148,7 +190,7 @@ the WAV path as the final argument and reads transcript-only stdout.
 11. Cancel during upload with `START`; require no replacement of the last complete
     BMP and no wedged media connection on the next launch.
 
-## F. Local failure and reconnect matrix
+## G. Local failure and reconnect matrix
 
 1. Stop the bridge while idle. Require heartbeat detection, reconnect backoff,
    working scrolling/buttons and no HTTP event polls.
@@ -169,7 +211,7 @@ the WAV path as the final argument and reads transcript-only stdout.
    Require heartbeats and assistant events not to starve.
 10. Press `START` from ordinary UI and require clean Homebrew Launcher return.
 
-## G. Self-hosted remote relay (explicitly unsafe test build)
+## H. Self-hosted remote relay (explicitly unsafe test build)
 
 Use a disposable/private test server. The public 3DS sockets are plaintext and
 unauthenticated. Do not transmit credentials, proprietary code or sensitive audio.
@@ -212,7 +254,7 @@ Rebuild the 3DS client with the relay's numeric IPv4 and public ports 9080/9081.
 9. Use a wrong bridge token. Confirm no tunnel is paired and no token is logged.
 10. After testing, close the four firewall ports and remove the relay process.
 
-## H. Pass report
+## I. Pass report
 
 For each failed item capture:
 
@@ -224,7 +266,7 @@ For each failed item capture:
 - whether a full reboot was needed;
 - resulting WAV/BMP when relevant.
 
-Do not call the build hardware-ready until every applicable A–G item passes or
+Do not call the build hardware-ready until every applicable A–H item passes or
 is explicitly waived with a documented reason. This checklist does not approve
 the relay for public/security-sensitive use; QR pairing, device credentials,
 revocation and production TLS remain a separate release gate.
