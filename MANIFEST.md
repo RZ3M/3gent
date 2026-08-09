@@ -4,6 +4,7 @@ Primary project boundaries:
 
 - `.gitignore`
 - `AGENTS.md`
+- `CLAUDE.md` — pointer to `AGENTS.md`
 - `README.md`
 - `client-3ds/` — libctru thin client, build instructions, and hardware checks
 - `bridge/` — TypeScript/Node bridge, fake adapter, and automated tests
