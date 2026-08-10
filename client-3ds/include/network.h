@@ -14,6 +14,18 @@ typedef enum {
 bool network_start(char *error, size_t error_capacity);
 
 /*
+ * Called while a blocking network wait has nothing to do, roughly once per
+ * frame. The synchronous calls here — warming the connections, resuming a
+ * session — can take seconds on a quiet LAN, and the screen behind them is
+ * usually showing a spinner that would otherwise sit on a single frame for the
+ * whole wait. Registering `render_frame` keeps it moving. Pass NULL to clear.
+ *
+ * The callback must not itself call into this module.
+ */
+typedef void (*NetworkWaitCallback)(void *user_data);
+void network_set_wait_callback(NetworkWaitCallback callback, void *user_data);
+
+/*
  * Sets the paired device credential. When present it is sent as an
  * `Authorization: Bearer` header on every HTTP request and in the pushed
  * control hello. Pass NULL or "" to send nothing, which is what an unpaired

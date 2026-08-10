@@ -312,6 +312,64 @@ void network_stop(void)
     soc_buffer = NULL;
 }
 
+/* ------------------------------------------------------------ blocking waits -- */
+
+/* One 60 Hz frame: short enough that a spinner behind a wait keeps turning. */
+#define NETWORK_WAIT_SLICE_MS 16U
+
+static NetworkWaitCallback wait_callback;
+static void *wait_callback_data;
+
+void network_set_wait_callback(NetworkWaitCallback callback, void *user_data)
+{
+    wait_callback = callback;
+    wait_callback_data = user_data;
+}
+
+/*
+ * select(), in slices. Every blocking wait in this module is a wait the user is
+ * sitting in front of, so the caller gets a tick between slices and can redraw;
+ * a single long select leaves whatever is on screen frozen for its whole
+ * duration. Returns what select() returned for the slice that resolved, or 0
+ * once `timeout_seconds` has passed with nothing happening.
+ */
+static int wait_on_socket(
+    int socket_fd,
+    bool wait_for_write,
+    unsigned int timeout_seconds
+)
+{
+    const u64 deadline = osGetTime() + (u64)timeout_seconds * 1000u;
+
+    for (;;) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(socket_fd, &set);
+
+        struct timeval slice = {
+            .tv_sec = 0,
+            .tv_usec = (long)(NETWORK_WAIT_SLICE_MS * 1000U),
+        };
+        const int result = select(
+            socket_fd + 1,
+            wait_for_write ? NULL : &set,
+            wait_for_write ? &set : NULL,
+            NULL,
+            &slice
+        );
+        if (result != 0) {
+            return result;
+        }
+
+        if (wait_callback != NULL) {
+            wait_callback(wait_callback_data);
+        }
+        if (osGetTime() >= deadline) {
+            return 0;
+        }
+    }
+}
+
 static bool connect_with_timeout(
     int socket_fd,
     const struct sockaddr *address,
@@ -351,16 +409,11 @@ static bool connect_with_timeout(
     }
 
     if (result < 0) {
-        fd_set write_set;
-        FD_ZERO(&write_set);
-        FD_SET(socket_fd, &write_set);
-
-        struct timeval timeout = {
-            .tv_sec = THREEGENT_NETWORK_TIMEOUT_SECONDS,
-            .tv_usec = 0,
-        };
-
-        result = select(socket_fd + 1, NULL, &write_set, NULL, &timeout);
+        result = wait_on_socket(
+            socket_fd,
+            true,
+            THREEGENT_NETWORK_TIMEOUT_SECONDS
+        );
         if (result == 0) {
             set_error(error, error_capacity, "connect timed out");
             return false;
@@ -368,11 +421,6 @@ static bool connect_with_timeout(
         if (result < 0) {
             int saved_errno = errno;
             set_errno_error(error, error_capacity, "select", saved_errno);
-            return false;
-        }
-
-        if (!FD_ISSET(socket_fd, &write_set)) {
-            set_error(error, error_capacity, "connect did not become writable");
             return false;
         }
 
@@ -396,28 +444,10 @@ static bool wait_for_socket(
     size_t error_capacity
 )
 {
-    fd_set read_set;
-    fd_set write_set;
-    FD_ZERO(&read_set);
-    FD_ZERO(&write_set);
-
-    if (wait_for_write) {
-        FD_SET(socket_fd, &write_set);
-    } else {
-        FD_SET(socket_fd, &read_set);
-    }
-
-    struct timeval timeout = {
-        .tv_sec = THREEGENT_NETWORK_TIMEOUT_SECONDS,
-        .tv_usec = 0,
-    };
-
-    int result = select(
-        socket_fd + 1,
-        wait_for_write ? NULL : &read_set,
-        wait_for_write ? &write_set : NULL,
-        NULL,
-        &timeout
+    const int result = wait_on_socket(
+        socket_fd,
+        wait_for_write,
+        THREEGENT_NETWORK_TIMEOUT_SECONDS
     );
     if (result == 0) {
         if (error != NULL && error_capacity > 0) {

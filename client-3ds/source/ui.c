@@ -47,6 +47,9 @@
 
 #define UI_CHAMFER          3.0f
 
+/* Diameter of a round key cap, and the height a shoulder cap is built from. */
+#define UI_KEY_CAP          18.0f
+
 /* ------------------------------------------------------------- internals -- */
 
 #define UI_TEXT_GLYPH_CAPACITY 3072
@@ -226,6 +229,39 @@ static void ui_panel_outlined(
 {
     ui_panel(x - 1.0f, y - 1.0f, width + 2.0f, height + 2.0f, chamfer + 1.0f, border);
     ui_panel(x, y, width, height, chamfer, fill);
+}
+
+/*
+ * The large panels: the approval card, the paired-machine card, the task detail
+ * card, the decision hero.
+ *
+ * The accent used to be a three-pixel bar sitting on the panel's own left edge.
+ * On hardware that reads as a stroke floating beside the panel rather than part
+ * of it: the border it sits against is one dim pixel, and the chamfer cuts the
+ * bar short at both ends so it never meets a corner. The accent is now a tick
+ * inset inside the surface — the same grammar the bottom-screen list rows use,
+ * which is the one that already reads well on the panel — and the fill and
+ * border are mixed toward the accent so the whole box carries the state instead
+ * of one edge of it.
+ */
+static void ui_card(
+    float x,
+    float y,
+    float width,
+    float height,
+    u32 accent
+)
+{
+    ui_panel_outlined(
+        x,
+        y,
+        width,
+        height,
+        UI_CHAMFER,
+        ui_blend(accent, 16, UI_BG2),
+        ui_blend(accent, 150, UI_LINE)
+    );
+    ui_fill(x + 5.0f, y + 7.0f, 2.0f, height - 14.0f, accent);
 }
 
 static void ui_pill(float x, float y, float width, float height, u32 color)
@@ -582,6 +618,27 @@ static UiAgentBadge ui_agent_badge(const UiModel *model)
     UiAgentBadge badge = { "UNKNOWN", UI_INK_FAINT, false };
     const char *state = model->agent_state != NULL ? model->agent_state : "";
 
+    /*
+     * The task manager is not inside a task, so the per-task agent state is
+     * stale there and says "CONNECTING" for as long as the user stays on the
+     * list. What the screen can actually answer is whether the bridge is
+     * talking to us — and a list of its tasks is the proof that it is.
+     */
+    if (model->screen == UI_SCREEN_SESSIONS) {
+        if (model->tasks_loading) {
+            badge.label = "LOADING";
+            badge.color = UI_AZURE;
+            badge.busy = true;
+        } else if (model->tasks_retryable) {
+            badge.label = "OFFLINE";
+            badge.color = UI_ROSE;
+        } else {
+            badge.label = "CONNECTED";
+            badge.color = UI_MINT;
+        }
+        return badge;
+    }
+
     if (model->approval_pending || strcmp(state, "waiting_for_user") == 0) {
         badge.label = "APPROVAL";
         badge.color = UI_CORAL;
@@ -702,6 +759,58 @@ static void ui_accent_rule(float x, float y, float width, float height)
     const float half = width / 2.0f;
     ui_fill_horizontal(x, y, half, height, UI_AZURE, UI_VIOLET);
     ui_fill_horizontal(x + half, y, half, height, UI_VIOLET, UI_MINT);
+}
+
+/*
+ * A key cap is drawn as the key is actually shaped: A, B, X, Y, START and
+ * SELECT are round on the hardware, and only the shoulders are rectangles. The
+ * cap is the button, so the two have to agree — a square A teaches the thumb to
+ * look in the wrong place.
+ */
+static bool ui_key_is_shoulder(const char *cap)
+{
+    if (cap == NULL) {
+        return false;
+    }
+    const char *letters = cap[0] == 'Z' ? cap + 1 : cap;
+    return (letters[0] == 'L' || letters[0] == 'R') && letters[1] == '\0';
+}
+
+/* A shoulder cap is wider than tall, which is the shape under the finger. */
+static float ui_key_cap_width(float size, const char *cap)
+{
+    return ui_key_is_shoulder(cap) ? size + 4.0f : size;
+}
+
+static void ui_key_cap(
+    float center_x,
+    float center_y,
+    float size,
+    const char *cap,
+    u32 fill,
+    u32 ink
+)
+{
+    const float width = ui_key_cap_width(size, cap);
+    if (ui_key_is_shoulder(cap)) {
+        const float height = size * 0.72f;
+        ui_panel(
+            center_x - width / 2.0f,
+            center_y - height / 2.0f,
+            width,
+            height,
+            2.0f,
+            fill
+        );
+    } else {
+        ui_dot(center_x, center_y, size / 2.0f, fill);
+    }
+    /*
+     * The font box has more room above the glyph than below it, so centring the
+     * box would sit the letter low. This offset centres the letter itself, and
+     * is tuned for UI_SCALE_MICRO — the only scale a cap is ever drawn at.
+     */
+    ui_draw(center_x, center_y - 7.0f, UI_SCALE_MICRO, ink, C2D_AlignCenter, cap);
 }
 
 static void ui_badge(float right_x, float y, const UiAgentBadge *badge)
@@ -976,16 +1085,7 @@ static void ui_attention_card(
     const float width = UI_TOP_W - 2.0f * x;
     const float height = 146.0f;
 
-    ui_panel_outlined(
-        x,
-        y,
-        width,
-        height,
-        UI_CHAMFER,
-        UI_BG2,
-        ui_alpha(accent, 120)
-    );
-    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
+    ui_card(x, y, width, height, accent);
 
     ui_draw(x + 16.0f, y + 12.0f, UI_SCALE_LABEL, accent, C2D_AlignLeft, title);
     ui_fill(x + 16.0f, y + 31.0f, width - 32.0f, 1.0f, ui_alpha(UI_LINE, 220));
@@ -1588,31 +1688,54 @@ static void ui_action_bar(const UiModel *model)
         );
 
         /* Key cap first: the button and the physical key are one thing. */
-        const float cap = 18.0f;
-        const float cap_x = x + 9.0f;
-        const float cap_y = y + (height - cap) / 2.0f;
-        ui_panel(
-            cap_x,
-            cap_y,
+        const float cap = UI_KEY_CAP;
+        const u32 cap_fill = ui_blend(actions[index].accent, 90, UI_BG0);
+        const u32 cap_ink = accented ? actions[index].accent : UI_INK;
+        const u32 label_ink = accented ? UI_INK : UI_INK_DIM;
+
+        /*
+         * Four actions across leaves 70 px each, and a cap beside the label
+         * leaves under 30 px of that for the word — enough to turn "Photo" into
+         * "Ph..." on the device, where the real system font is wider than the
+         * host preview's estimate. Three across is only a little better. Below
+         * this width the cap sits above the label instead, which gives the word
+         * the whole button; two across still has room to sit side by side.
+         */
+        if (width < 110.0f) {
+            ui_key_cap(
+                x + width / 2.0f,
+                y + 13.0f,
+                cap,
+                actions[index].cap,
+                cap_fill,
+                cap_ink
+            );
+            ui_draw_clipped(
+                x + width / 2.0f,
+                y + 24.0f,
+                width - 8.0f,
+                UI_SCALE_LABEL,
+                label_ink,
+                C2D_AlignCenter,
+                actions[index].label
+            );
+            continue;
+        }
+
+        ui_key_cap(
+            x + 9.0f + cap / 2.0f,
+            y + height / 2.0f,
             cap,
-            cap,
-            2.0f,
-            ui_blend(actions[index].accent, 90, UI_BG0)
-        );
-        ui_draw(
-            cap_x + cap / 2.0f,
-            cap_y + 2.0f,
-            UI_SCALE_MICRO,
-            accented ? actions[index].accent : UI_INK,
-            C2D_AlignCenter,
-            actions[index].cap
+            actions[index].cap,
+            cap_fill,
+            cap_ink
         );
         ui_draw_clipped(
-            cap_x + cap + 7.0f,
+            x + 9.0f + cap + 7.0f,
             y + height / 2.0f - 7.0f,
-            width - cap - 24.0f,
+            width - cap - 26.0f,
             UI_SCALE_LABEL,
-            accented ? UI_INK : UI_INK_DIM,
+            label_ink,
             C2D_AlignLeft,
             actions[index].label
         );
@@ -1687,14 +1810,25 @@ static void ui_hero_push_to_talk(const UiModel *model)
     ui_microphone_glyph(x + 38.0f, y + height / 2.0f, accent);
 
     if (ready) {
-        ui_draw(
-            x + 74.0f,
-            y + 14.0f,
-            UI_SCALE_HEAD,
-            UI_INK,
-            C2D_AlignLeft,
-            "HOLD  R  TO TALK"
+        /*
+         * The shoulder is named with the same cap the action bar uses, so the
+         * key the sentence is talking about looks like the key on the hardware.
+         */
+        const float head_y = y + 14.0f;
+        const float cap_width = ui_key_cap_width(UI_KEY_CAP, "R");
+        float cursor = x + 74.0f;
+        ui_draw(cursor, head_y, UI_SCALE_HEAD, UI_INK, C2D_AlignLeft, "HOLD");
+        cursor += ui_measure("HOLD", UI_SCALE_HEAD) + 9.0f;
+        ui_key_cap(
+            cursor + cap_width / 2.0f,
+            head_y + 8.0f,
+            UI_KEY_CAP,
+            "R",
+            ui_blend(accent, 90, UI_BG0),
+            accent
         );
+        cursor += cap_width + 9.0f;
+        ui_draw(cursor, head_y, UI_SCALE_HEAD, UI_INK, C2D_AlignLeft, "TO TALK");
         ui_draw(
             x + 74.0f,
             y + 38.0f,
@@ -1868,8 +2002,7 @@ static void ui_hero_decision(
     const float width = UI_HERO_W;
     const float height = UI_HERO_H;
 
-    ui_panel_outlined(x, y, width, height, UI_CHAMFER, UI_BG2, ui_alpha(accent, 130));
-    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
+    ui_card(x, y, width, height, accent);
 
     ui_draw(x + 14.0f, y + 8.0f, UI_SCALE_MICRO, accent, C2D_AlignLeft, title);
 
@@ -2060,26 +2193,19 @@ static void ui_render_top_home(const UiModel *model)
     );
 
     const float x = 46.0f;
-    const float y = 104.0f;
+    const float y = 98.0f;
     const float width = UI_TOP_W - 2.0f * x;
-    const float height = 76.0f;
+    const float height = 90.0f;
     const u32 accent = model->paired ? UI_MINT : UI_AZURE;
 
-    ui_panel_outlined(
-        x,
-        y,
-        width,
-        height,
-        UI_CHAMFER,
-        UI_BG2,
-        ui_alpha(accent, model->paired ? 110 : 70)
-    );
-    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
+    ui_card(x, y, width, height, accent);
+    /* The rule sits at the same height either way, so the card does not jump. */
+    ui_fill(x + 16.0f, y + 53.0f, width - 32.0f, 1.0f, ui_alpha(UI_INK_FAINT, 110));
 
     if (model->paired) {
         ui_draw(
             x + 16.0f,
-            y + 11.0f,
+            y + 12.0f,
             UI_SCALE_MICRO,
             accent,
             C2D_AlignLeft,
@@ -2087,7 +2213,7 @@ static void ui_render_top_home(const UiModel *model)
         );
         ui_draw_clipped(
             x + 16.0f,
-            y + 27.0f,
+            y + 28.0f,
             width - 32.0f,
             UI_SCALE_HEAD,
             UI_INK,
@@ -2096,7 +2222,7 @@ static void ui_render_top_home(const UiModel *model)
         );
         ui_draw_clipped(
             x + 16.0f,
-            y + 49.0f,
+            y + 60.0f,
             width - 32.0f,
             UI_SCALE_MICRO,
             UI_INK_DIM,
@@ -2105,7 +2231,7 @@ static void ui_render_top_home(const UiModel *model)
         );
         ui_draw_clipped(
             x + 16.0f,
-            y + 60.0f,
+            y + 73.0f,
             width - 32.0f,
             UI_SCALE_MICRO,
             ui_alpha(UI_INK_FAINT, 210),
@@ -2115,7 +2241,7 @@ static void ui_render_top_home(const UiModel *model)
     } else {
         ui_draw(
             x + 16.0f,
-            y + 11.0f,
+            y + 12.0f,
             UI_SCALE_MICRO,
             accent,
             C2D_AlignLeft,
@@ -2123,7 +2249,7 @@ static void ui_render_top_home(const UiModel *model)
         );
         ui_draw_clipped(
             x + 16.0f,
-            y + 27.0f,
+            y + 30.0f,
             width - 32.0f,
             UI_SCALE_BODY,
             UI_INK,
@@ -2132,7 +2258,7 @@ static void ui_render_top_home(const UiModel *model)
         );
         ui_draw_clipped(
             x + 16.0f,
-            y + 48.0f,
+            y + 61.0f,
             width - 32.0f,
             UI_SCALE_MICRO,
             UI_INK_DIM,
@@ -2488,6 +2614,21 @@ static void ui_render_bottom_pairing(const UiModel *model)
  */
 #define UI_TASK_ROWS_MAX 4u
 
+/*
+ * "Start a new task" is row `task_count`: one past the end of the list, and the
+ * row the selection lands on when the user walks off the bottom of it.
+ */
+static bool ui_task_new_row_visible(const UiModel *model)
+{
+    return !model->tasks_retryable;
+}
+
+static bool ui_task_new_row_selected(const UiModel *model)
+{
+    return ui_task_new_row_visible(model)
+        && model->task_selected >= model->task_count;
+}
+
 static size_t ui_task_list_first(const UiModel *model, size_t *visible)
 {
     const size_t shown = model->task_count < UI_TASK_ROWS_MAX
@@ -2497,9 +2638,16 @@ static size_t ui_task_list_first(const UiModel *model, size_t *visible)
     if (model->task_count <= UI_TASK_ROWS_MAX) {
         return 0;
     }
+    /*
+     * Selecting the new-task row keeps the window where the end of the list is,
+     * so stepping past the last task does not scroll anything out from under it.
+     */
+    const size_t anchor = model->task_selected < model->task_count
+        ? model->task_selected
+        : model->task_count - 1;
     size_t first = 0;
-    if (model->task_selected >= UI_TASK_ROWS_MAX) {
-        first = model->task_selected - UI_TASK_ROWS_MAX + 1;
+    if (anchor >= UI_TASK_ROWS_MAX) {
+        first = anchor - UI_TASK_ROWS_MAX + 1;
     }
     if (first + UI_TASK_ROWS_MAX > model->task_count) {
         first = model->task_count - UI_TASK_ROWS_MAX;
@@ -2586,19 +2734,63 @@ static void ui_render_top_sessions(const UiModel *model)
         );
     }
 
+    const float x = 24.0f;
+    const float y = UI_HEADER_H + 26.0f;
+    const float width = UI_TOP_W - 2.0f * x;
+    const float height = 108.0f;
+
+    /* The last row is not a task, so the detail card describes what it does. */
+    if (ui_task_new_row_selected(model)) {
+        ui_card(x, y, width, height, UI_VIOLET);
+        ui_draw(
+            x + 16.0f,
+            y + 12.0f,
+            UI_SCALE_MICRO,
+            UI_INK_FAINT,
+            C2D_AlignLeft,
+            "NEW TASK"
+        );
+        ui_draw(
+            x + 16.0f,
+            y + 34.0f,
+            UI_SCALE_BODY,
+            UI_INK,
+            C2D_AlignLeft,
+            "Start a fresh task on the bridge"
+        );
+        ui_fill(
+            x + 16.0f,
+            y + height - 34.0f,
+            width - 32.0f,
+            1.0f,
+            ui_alpha(UI_LINE, 220)
+        );
+        ui_draw(
+            x + 16.0f,
+            y + height - 26.0f,
+            UI_SCALE_MICRO,
+            UI_INK_DIM,
+            C2D_AlignLeft,
+            "It opens straight away, with nothing said yet"
+        );
+        ui_draw(
+            x + 16.0f,
+            y + height - 15.0f,
+            UI_SCALE_MICRO,
+            ui_alpha(UI_INK_FAINT, 210),
+            C2D_AlignLeft,
+            "A starts it; X starts one from anywhere in this list"
+        );
+        return;
+    }
+
     const size_t selected = model->task_selected < model->task_count
         ? model->task_selected
         : 0;
     const UiTask *task = &model->tasks[selected];
     const u32 accent = ui_task_accent(task->state);
 
-    const float x = 24.0f;
-    const float y = UI_HEADER_H + 26.0f;
-    const float width = UI_TOP_W - 2.0f * x;
-    const float height = 108.0f;
-
-    ui_panel_outlined(x, y, width, height, UI_CHAMFER, UI_BG2, ui_alpha(accent, 120));
-    ui_fill(x, y + UI_CHAMFER, 3.0f, height - 2.0f * UI_CHAMFER, accent);
+    ui_card(x, y, width, height, accent);
 
     ui_drawf(
         x + 16.0f,
@@ -2704,17 +2896,18 @@ static void ui_render_bottom_sessions(const UiModel *model)
 
     /*
      * A row rather than a button, so starting a task is reachable the same way
-     * as opening one. X remains the shortcut for anyone using the keys. It is
-     * absent while the bridge is unreachable: starting a task would fail the
-     * same way listing them just did, and retrying is the only useful move.
+     * as opening one: the D-pad walks onto it and A takes it. X remains the
+     * shortcut for anyone using the keys. It is absent while the bridge is
+     * unreachable, because starting a task would fail the same way listing them
+     * just did, and retrying is the only useful move.
      */
-    if (!model->tasks_retryable) {
+    if (ui_task_new_row_visible(model)) {
         ui_list_row(
             model,
             visible,
             "+  Start a new task",
             "X   fresh Codex task in the bridge workspace",
-            false,
+            ui_task_new_row_selected(model),
             !model->tasks_loading,
             UI_VIOLET
         );
@@ -2733,11 +2926,14 @@ static void ui_render_bottom_sessions(const UiModel *model)
         );
     }
 
+    /* A does whichever of the two things the selected row actually is. */
     ui_hint_line(
         UI_BAR_Y - 13.0f,
         model->tasks_retryable
             ? "A retries      B back to the start screen"
-            : "Up/Down choose      A open      B back"
+            : (ui_task_new_row_selected(model)
+                ? "Up/Down choose      A start it      B back"
+                : "Up/Down choose      A open      B back")
     );
     ui_bottom_bar(model);
 }
@@ -3188,7 +3384,8 @@ UiHit ui_hit_test(const UiModel *model, unsigned int x, unsigned int y)
         case UI_SCREEN_SESSIONS: {
             size_t visible = 0;
             const size_t first = ui_task_list_first(model, &visible);
-            const bool can_start = !model->tasks_loading && !model->tasks_retryable;
+            const bool can_start =
+                ui_task_new_row_visible(model) && !model->tasks_loading;
             const size_t row = ui_hit_row(x, y, visible + (can_start ? 1 : 0));
             if (row < visible) {
                 return (UiHit){ UI_HIT_MENU_ROW, first + row };

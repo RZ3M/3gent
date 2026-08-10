@@ -378,6 +378,23 @@ int main(void)
     ui_render(&model);
     write_document("09-tasks-scrolled", "tasks / windowed past the top of the list");
 
+    /* Task manager with the selection walked past the last task */
+    base_model(&model);
+    model.screen = UI_SCREEN_SESSIONS;
+    model.agent_state = "connecting";
+    model.session_label = "";
+    model.view_state = "Tasks";
+    model.detail = "6 recent Codex tasks";
+    model.detail_secondary = "";
+    model.tasks = sample_tasks;
+    model.task_count = 6;
+    model.task_selected = 6;
+    model.task_active = 0;
+    model.tasks_status = "";
+    preview_set_time(2850);
+    ui_render(&model);
+    write_document("10-tasks-new", "tasks / the new-task row is a selectable row");
+
     /* Task manager, discovery failed */
     base_model(&model);
     model.screen = UI_SCREEN_SESSIONS;
@@ -394,7 +411,7 @@ int main(void)
     model.tasks_status = "Session request failed: connection refused";
     preview_set_time(3000);
     ui_render(&model);
-    write_document("10-tasks-error", "tasks / bridge unreachable");
+    write_document("11-tasks-error", "tasks / bridge unreachable");
 
     /* Idle with a completed response and one quiet task */
     base_model(&model);
@@ -408,7 +425,7 @@ int main(void)
     model.diff_deletions = 12;
     preview_set_time(4200);
     ui_render(&model);
-    write_document("11-idle", "main / completed turn, single task");
+    write_document("12-idle", "main / completed turn, single task");
 
     /*
      * Idle inside a busy rail, scrolled back through a long answer: this is the
@@ -432,7 +449,7 @@ int main(void)
     model.scroll_lines = 9;
     preview_set_time(4600);
     ui_render(&model);
-    write_document("12-idle-rail", "main / busy rail, scrolled back, scroll controls live");
+    write_document("13-idle-rail", "main / busy rail, scrolled back, scroll controls live");
 
     /* Streaming */
     base_model(&model);
@@ -450,7 +467,7 @@ int main(void)
     model.session_label = "protocol - version the capture envelope";
     preview_set_time(5600);
     ui_render(&model);
-    write_document("13-working", "main / agent working, response streaming");
+    write_document("14-working", "main / agent working, response streaming");
 
     /* Recording. Several frames prime the scrolling level history. */
     base_model(&model);
@@ -469,7 +486,7 @@ int main(void)
         preview_set_time(9000 + frame * 16);
         ui_render(&model);
     }
-    write_document("14-recording", "main / push-to-talk with a live level trace");
+    write_document("15-recording", "main / push-to-talk with a live level trace");
 
     /* Transcript review */
     base_model(&model);
@@ -482,7 +499,7 @@ int main(void)
     model.detail = "Held 7420 ms; captured 7380 ms (241664 bytes)";
     preview_set_time(11000);
     ui_render(&model);
-    write_document("15-transcript", "main / review the transcript before sending");
+    write_document("16-transcript", "main / review the transcript before sending");
 
     /* Approval */
     base_model(&model);
@@ -497,7 +514,7 @@ int main(void)
     model.detail = "Command accepted in 44 ms";
     preview_set_time(12600);
     ui_render(&model);
-    write_document("16-approval", "main / approval required");
+    write_document("17-approval", "main / approval required");
 
     /* Approval with the approve button under a finger */
     base_model(&model);
@@ -520,7 +537,7 @@ int main(void)
     model.touch_y = 175;
     preview_set_time(12900);
     ui_render(&model);
-    write_document("17-approval-touch", "main / approving by stylus");
+    write_document("18-approval-touch", "main / approving by stylus");
 
     /* Microphone unavailable, so the only input left is the keyboard */
     base_model(&model);
@@ -531,7 +548,7 @@ int main(void)
     model.detail_secondary = "";
     preview_set_time(13400);
     ui_render(&model);
-    write_document("18-no-mic", "main / empty task with no microphone");
+    write_document("19-no-mic", "main / empty task with no microphone");
 
     /* Photo review */
     base_model(&model);
@@ -544,7 +561,7 @@ int main(void)
     ui_photo_preview_set(photo, 400, 240);
     preview_set_time(14000);
     ui_render(&model);
-    write_document("19-photo", "camera / review before attaching");
+    write_document("20-photo", "camera / review before attaching");
 
     /* Photo upload */
     base_model(&model);
@@ -556,7 +573,7 @@ int main(void)
     model.photo_progress_percent = 64;
     preview_set_time(14600);
     ui_render(&model);
-    write_document("20-photo-upload", "camera / bounded upload in progress");
+    write_document("21-photo-upload", "camera / bounded upload in progress");
     ui_photo_preview_clear();
 
     write_index();

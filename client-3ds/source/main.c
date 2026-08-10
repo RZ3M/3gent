@@ -407,6 +407,13 @@ static void render_frame(void)
     ui_render(&model);
 }
 
+/* Handed to the network module so its blocking waits keep the screen alive. */
+static void network_wait_redraw(void *user_data)
+{
+    (void)user_data;
+    render_frame();
+}
+
 static size_t get_max_scroll(void)
 {
     UiModel model;
@@ -677,8 +684,9 @@ static void apply_session_list(const char *body)
             }
         }
     }
-    if (task_selected >= task_count) {
-        task_selected = task_count > 0 ? task_count - 1 : 0;
+    /* `task_count` is the "start a new task" row, so it is a legal selection. */
+    if (task_selected > task_count) {
+        task_selected = task_count;
     }
 }
 
@@ -1001,23 +1009,34 @@ static TasksResult run_task_manager(void)
             keys |= KEY_A;
         }
 
+        /*
+         * The list is the tasks plus one more row: "start a new task". Walking
+         * off the bottom of the tasks lands on it rather than wrapping, so the
+         * D-pad and the stylus reach the same set of rows.
+         */
+        const size_t row_count = task_count + 1;
+
         if ((keys & (KEY_B | KEY_START)) != 0) {
             return TASKS_BACK;
         }
-        if ((keys & (KEY_DUP | KEY_CPAD_UP)) != 0 && task_count > 0) {
+        if ((keys & (KEY_DUP | KEY_CPAD_UP)) != 0) {
             task_selected = task_selected == 0
-                ? task_count - 1
+                ? row_count - 1
                 : task_selected - 1;
         }
-        if ((keys & (KEY_DDOWN | KEY_CPAD_DOWN)) != 0 && task_count > 0) {
-            task_selected = (task_selected + 1) % task_count;
+        if ((keys & (KEY_DDOWN | KEY_CPAD_DOWN)) != 0) {
+            task_selected = (task_selected + 1) % row_count;
         }
-        if ((keys & KEY_A) != 0 && task_count > 0) {
-            if (resume_session(task_selected)) {
+        if ((keys & KEY_A) != 0) {
+            /* A on the last row means the same thing X means everywhere here. */
+            if (task_selected >= task_count) {
+                keys |= KEY_X;
+            } else if (resume_session(task_selected)) {
                 attach_to_current_session();
                 return TASKS_OPENED;
+            } else {
+                set_task_status(network_detail);
             }
-            set_task_status(network_detail);
         }
         if ((keys & KEY_X) != 0) {
             if (start_new_session()) {
@@ -2802,6 +2821,12 @@ int main(int argc, char **argv)
     }
 
     network_ready = network_start(network_detail, sizeof(network_detail));
+    /*
+     * Synchronous requests draw the screen behind them while they wait, so a
+     * spinner keeps turning through a connection warm-up instead of freezing on
+     * the frame that was up when the call started.
+     */
+    network_set_wait_callback(network_wait_redraw, NULL);
     microphone_initialize(microphone_detail, sizeof(microphone_detail));
 
     PairingRecord saved;

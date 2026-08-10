@@ -70,6 +70,20 @@ like; anything below that disagrees with the preview is a hardware finding.
 12. Record whether battery drain during a ten-minute idle session is noticeably
     worse than the `0.6.2-hwtest` console build. Both screens now redraw every
     frame; if this is a problem it is a decision for D-020, not a bug fix.
+13. Choose Connect and watch the "Warming low-latency links..." screen. The
+    bottom-screen spinner must **turn** for the whole wait, not sit on one
+    frame. To see a long one, connect with the bridge stopped and confirm the
+    spinner keeps turning until the timeout reports the failure. This is the
+    check on `network_set_wait_callback`: a frozen spinner means a blocking wait
+    is not ticking the redraw.
+14. Read every action-bar label on the device font, on both an Old and a New
+    3DS, in each of the four-, three- and two-button bars — idle (`Type Photo
+    New Tasks`), transcript review (`Send Edit Cancel`), and approval (`Approve
+    once Decline`). No label may be truncated with an ellipsis. The host preview
+    approximates glyph advances and will not catch this.
+15. On the idle bar, confirm the `A`, `X` and `B` caps are drawn as circles and
+    the `L` cap as a rectangle, and that the `R` named in the push-to-talk panel
+    is a rectangle. They must match the shapes of the keys under your thumb.
 
 ## B2. QR pairing gate
 
@@ -173,6 +187,16 @@ approval.
 14. Leave the app on the task screen for five minutes without touching it.
     Confirm the five-second background task refresh causes no visible frame-rate
     change, no log spam, and no interference with a streaming turn.
+15. In the task manager, hold Down past the last task. Confirm the selection
+    lands on "Start a new task", that the top screen switches to the NEW TASK
+    card, that Down again wraps to the first task, and that `A` on that row
+    starts a task exactly as `X` does. Repeat with the Circle Pad.
+16. With more tasks than fit on screen, walk the selection down onto the new-task
+    row and confirm the list does not scroll out from under it: the last four
+    tasks must stay visible with the new-task row beneath them.
+17. On the task manager, confirm the state pill reads `CONNECTED` while a list
+    is on screen — never `CONNECTING` — and that it reads `OFFLINE` when the
+    bridge is stopped and the retry screen appears.
 
 ## C. Deterministic fake-adapter regression
 

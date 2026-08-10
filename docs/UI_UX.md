@@ -49,10 +49,28 @@ Agent state is never carried by colour alone. Every state also has a word
 Panels are **chamfered**, not rounded. A 3 px bevel reads as deliberate at this
 pixel density and avoids citro2d's expensive circle-mode state change on every
 surface. Circles are reserved for things that are genuinely round: status dots,
-the microphone halo, and the spinner.
+the microphone halo, the spinner, and the face-button key caps.
 
 Tinted surfaces are pre-mixed to an opaque colour (`ui_blend`) rather than drawn
 translucent, because an outlined panel puts a filled border underneath the fill.
+
+The large panels — the approval card, the paired-machine card, the task detail
+card, the decision hero — all go through `ui_card`, which carries the accent in
+three places at once: an opaque border mixed toward it, a fill tinted a few
+percent toward it, and a tick **inset inside** the surface. The earlier version
+put a 3 px bar on the panel's own left edge, and on hardware that reads as a
+stroke floating beside the panel rather than part of it: the border it sits
+against is a single dim pixel, and the chamfer cuts the bar short of both
+corners. The inset tick is the grammar the bottom-screen list rows already use,
+which is the one that was already reading correctly on the panel.
+
+### Key caps
+
+A key cap is drawn as the key is actually shaped. `A`, `B`, `X`, `Y`, `START`
+and `SELECT` are round on the hardware, so their caps are circles; only the
+shoulders are rectangles. A square `A` sends the thumb to the wrong place. One
+helper, `ui_key_cap`, owns the distinction, so the action bar and the
+push-to-talk panel cannot disagree about what a key looks like.
 
 ### Motion
 
@@ -63,6 +81,14 @@ Animation is derived from `osGetTime()`, so it is frame-rate independent:
 - a pulsing ring while recording;
 - a scrolling level trace built from a 28-slot history of microphone level, so
   the meter reads as motion even when the level is steady.
+
+Frame-rate independence is not the same as getting frames. The synchronous
+network calls — warming the connections, resuming a session — used to block the
+one thread that draws, so the spinner they were put on screen to justify sat on
+a single frame for the whole wait. `network_set_wait_callback` hands the network
+module a redraw to call between wait slices, so anything animated behind a
+blocking request keeps moving. Nothing that animates may depend on the loop that
+would have been blocked.
 
 ## 4. Navigation model
 
@@ -122,9 +148,17 @@ Two screens, two jobs.
 
 A summary line states what the user would otherwise have to count — `6 TASKS`
 and `2 waiting on you`. "Start a new task" is the last row rather than a
-separate button, so starting a task is reached the same way as opening one; `X`
-remains the shortcut. It is absent while the bridge is unreachable, because
+separate button, so starting a task is reached the same way as opening one: the
+D-pad and Circle Pad walk onto it past the end of the list, `A` takes it, and
+the top screen describes it like any other row. `X` remains the shortcut from
+anywhere in the list. The row is absent while the bridge is unreachable, because
 starting a task would fail exactly as listing them just did.
+
+The state pill on this screen reports the **bridge**, not the agent. There is no
+open task to have a state, and the last one's state goes stale the moment the
+user leaves it — which is how the pill came to read `CONNECTING` over a list
+that could only have arrived from a machine that answered. It now reads
+`LOADING`, `CONNECTED` or `OFFLINE`, all three of which the screen can prove.
 
 ### Top screen — read surface
 
@@ -167,7 +201,11 @@ Two situations take the whole read surface:
   what is actually being decided. Recording takes the action band as well,
   because there is no competing action while the microphone is open;
 - **action bar (52 px):** the actions that are live right now, as touch targets
-  with their key caps, and nothing else;
+  with their key caps, and nothing else. Two across sit the cap beside the
+  label; three or four stack the cap above it, because a cap beside a 70 px
+  button leaves under 30 px for the word and the device font — wider than the
+  preview's estimate — turns `Photo` into `Ph...`. The button rectangle, and so
+  the touch target, is the same either way;
 - **status bar (36 px):** link state, bridge address, and microphone/audio/photo
   tokens.
 
@@ -175,7 +213,7 @@ Two situations take the whole read surface:
 
 | Key | Task | Task manager | Start screen | Pairing | Photo |
 | --- | --- | --- | --- | --- | --- |
-| `A` | approve · send transcript · type | open | select | rescan/continue | attach |
+| `A` | approve · send transcript · type | open · start the new-task row | select | rescan/continue | attach |
 | `B` | decline · cancel transcript · **back to tasks** | back | — | cancel | discard |
 | `X` | interrupt while working, otherwise new task | new task | — | — | — |
 | `Y` | edit a pending transcript | — | — | type the code | — |
@@ -187,7 +225,9 @@ Two situations take the whole read surface:
 
 The D-pad and Circle Pad are interchangeable everywhere. Up and down always mean
 "move through what you are reading"; left and right always mean "move between
-tasks".
+tasks". In the task manager, up and down reach every row on screen including
+"start a new task" — a row a stylus could take but the keys could not was a row
+in two different lists.
 
 ### Actions are shown only when they exist
 

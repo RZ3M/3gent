@@ -1025,6 +1025,50 @@ feels protective or obstructive; whether the five-second background refresh is
 visible in battery or frame rate; and whether a task switch's stop/resume/replay
 round trip is fast enough to feel like switching rather than reconnecting.
 
+**2026-08-09 first hardware pass (New 3DS):** five findings, four of which the
+host preview could not have produced.
+
+1. **A spinner is not motion if nothing is drawing.** `Warming low-latency
+   links...` renders one frame and then calls `network_prepare_connections`,
+   which blocks the only thread that draws for the whole connect and `/health`
+   round trip. Every animation in `ui.c` is already derived from `osGetTime()`
+   and so frame-rate independent — which is worth nothing when the frame count
+   is one. Fixed at the source rather than at the call site: `select()` in
+   `network.c` now runs in ~16 ms slices and calls an optional
+   `network_set_wait_callback` between them, and `main.c` registers
+   `render_frame`. The warm-up is the only caller of the blocking helpers today
+   — control requests, the pushed link and the audio stream all run on the
+   non-blocking state machine and already pump the loop — but any synchronous
+   call added later gets the redraw for free rather than reintroducing the same
+   frozen frame. The preview harness cannot show this at all; it renders single
+   frames from a model and never blocks.
+2. **The device font is wider than the preview's estimate.** The four-across
+   action bar left under 30 px beside a 18 px cap, so `Photo` and `Tasks` shipped
+   as `Ph...` and `Ta...` — on a bar whose entire job is naming what the keys do.
+   The preview's approximated advances said they fit. Cap and label now stack for
+   three- and four-across bars, which gives the word the whole 70 px button and
+   about a 2× margin against the estimate being wrong again. Off-device
+   measurement can size a layout but cannot prove text fit; checklist B.14 now
+   asks for every bar to be read on both panel generations.
+3. **An accent on a panel's own edge does not read as part of the panel.** The
+   large cards carried a 3 px bar down the left edge. On the LCD the effect is a
+   bright stroke floating beside a box: the border it abuts is one dim pixel, and
+   the chamfer cuts the bar short of both corners. The bottom-screen list rows,
+   which inset their tick, were reading correctly the whole time. `ui_card` now
+   applies that same treatment — opaque border mixed toward the accent, fill
+   tinted toward it, tick inset — to all four large panels.
+4. **A stale state word is worse than no state word.** The task manager showed
+   the last task's agent state, which is `connecting` from the moment the user
+   leaves a task, so the pill read `CONNECTING` above a list of tasks that could
+   only have come from a bridge that answered. The pill on that screen now
+   reports the bridge (`LOADING` / `CONNECTED` / `OFFLINE`), all three of which
+   the screen can prove.
+5. **A row the stylus can take and the keys cannot is two lists.** "Start a new
+   task" was drawn as a list row and hit-tested as one, but `task_selected` was
+   clamped to the tasks, so Up/Down wrapped around it. It is now index
+   `task_count` in a list of `task_count + 1` rows, with its own detail card on
+   the top screen, and `A` on it does what `X` does.
+
 ---
 
 ## Experiment template
